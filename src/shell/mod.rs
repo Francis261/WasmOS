@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
@@ -24,6 +25,7 @@ pub struct Shell {
     package_registry_path: String,
     package_catalog_path: String,
     package_hosts_path: String,
+    package_cache_dir: String,
     command_aliases: Mutex<BTreeMap<String, String>>,
     package_registry: Mutex<BTreeMap<String, InstalledPackage>>,
     package_hosts: Mutex<Vec<String>>,
@@ -69,6 +71,7 @@ impl Shell {
             package_registry_path: ".wasmos_packages.json".to_string(),
             package_catalog_path: ".wasmos_pkg_catalog.json".to_string(),
             package_hosts_path: ".wasmos_pkg_hosts.json".to_string(),
+            package_cache_dir: ".wasmos_pkg_cache".to_string(),
             command_aliases: Mutex::new(BTreeMap::new()),
             package_registry: Mutex::new(BTreeMap::new()),
             package_hosts: Mutex::new(vec![]),
@@ -525,11 +528,14 @@ impl Shell {
                         let entry = catalog
                             .get(&name)
                             .ok_or_else(|| anyhow::anyhow!("catalog entry missing for {name}"))?;
+                        let module_path = self
+                            .cache_module_if_remote(&name, &entry.version, &entry.module_path)
+                            .await?;
                         installed.insert(
                             name.clone(),
                             InstalledPackage {
                                 name: name.clone(),
-                                module_path: entry.module_path.clone(),
+                                module_path,
                                 dependencies: entry.dependencies.clone(),
                                 version: entry.version.clone(),
                             },
@@ -608,11 +614,14 @@ impl Shell {
                         continue;
                     };
                     if is_newer_version(&remote.version, &current.version) {
+                        let module_path = self
+                            .cache_module_if_remote(&name, &remote.version, &remote.module_path)
+                            .await?;
                         installed.insert(
                             name.clone(),
                             InstalledPackage {
                                 name: name.clone(),
-                                module_path: remote.module_path.clone(),
+                                module_path,
                                 dependencies: remote.dependencies.clone(),
                                 version: remote.version.clone(),
                             },
@@ -745,6 +754,35 @@ impl Shell {
         let response = response.error_for_status()?;
         let payload = response.text().await?;
         Ok(serde_json::from_str(&payload)?)
+    }
+
+    async fn cache_module_if_remote(
+        &self,
+        package: &str,
+        version: &str,
+        module_path: &str,
+    ) -> Result<String> {
+        if !is_remote_url(module_path) {
+            return Ok(module_path.to_string());
+        }
+
+        let program_bytes = Client::new()
+            .get(module_path)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+
+        let package = sanitize_path_component(package);
+        let version = sanitize_path_component(version);
+        let module_dir = PathBuf::from(&self.package_cache_dir)
+            .join(package)
+            .join(version);
+        fs::create_dir_all(&module_dir)?;
+        let module_file = module_dir.join("program.wasm");
+        fs::write(&module_file, &program_bytes)?;
+        Ok(module_file.to_string_lossy().to_string())
     }
 
     fn resolve_dependencies(
@@ -971,6 +1009,23 @@ fn parse_u64(value: Option<&str>, usage: &str) -> Result<u64> {
     Ok(value.parse::<u64>()?)
 }
 
+fn is_remote_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1122,19 @@ mod tests {
             .handle_command("pkg remove core-utils")
             .await
             .expect("dependency cleared remove should work");
+    }
+
+    #[test]
+    fn detects_remote_module_urls() {
+        assert!(is_remote_url("http://localhost:4010/program.wasm"));
+        assert!(is_remote_url("https://example.com/program.wasm"));
+        assert!(!is_remote_url("/tmp/program.wasm"));
+    }
+
+    #[test]
+    fn sanitizes_cache_path_components() {
+        assert_eq!(sanitize_path_component("cli-welcome"), "cli-welcome");
+        assert_eq!(sanitize_path_component("1.2.3"), "1_2_3");
+        assert_eq!(sanitize_path_component("pkg/name"), "pkg_name");
     }
 }
