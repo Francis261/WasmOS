@@ -1,0 +1,30 @@
+[package]
+name = "wasmos_guest_programs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasmos_guest_abi = { path = "../guest_abi" }
+url = { version = "2", features = ["serde"] }
+
+[[bin]]
+name = "cli_welcome"
+path = "src/bin/cli_welcome.rs"
+
+[[bin]]
+name = "file_ops"
+path = "src/bin/file_ops.rs"
+
+[[bin]]
+name = "http_fetch"
+path = "src/bin/http_fetch.rs"
+
+[[bin]]
+name = "gui_window"
+path = "src/bin/gui_window.rs"
+
+[[bin]]
+name = "cooperative_yielder"
+path = "src/bin/cooperative_yielder.rs"

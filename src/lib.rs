@@ -1,6 +1,7 @@
 pub mod gui;
 pub mod host;
 pub mod network;
+pub mod os_error;
 pub mod program_api;
 pub mod runtime;
 pub mod scheduler;

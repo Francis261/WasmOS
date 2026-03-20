@@ -51,9 +51,13 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(runtime: Arc<WasmRuntime>) -> Self {
+        Self::new_with_mode(runtime, SchedulingMode::Cooperative)
+    }
+
+    pub fn new_with_mode(runtime: Arc<WasmRuntime>, mode: SchedulingMode) -> Self {
         Self {
             runtime,
-            mode: SchedulingMode::Cooperative,
+            mode,
             tasks: RwLock::new(BTreeMap::new()),
             ready_queue: RwLock::new(VecDeque::new()),
             waiting_queue: RwLock::new(BTreeMap::new()),
@@ -84,28 +88,50 @@ impl Scheduler {
 
         let maybe_task = self.ready_queue.write().await.pop_front();
         if let Some(task_id) = maybe_task {
-            let quantum_ms = self.quantum_ms();
-            self.mark_running(task_id, quantum_ms).await;
-            let outcome = self.runtime.resume(task_id, quantum_ms).await;
-            match outcome {
-                Ok(RuntimePoll::Ready) | Ok(RuntimePoll::Yielded) => {
-                    self.requeue_task(task_id, TaskState::Yielded).await;
-                }
-                Ok(RuntimePoll::Waiting(reason)) => {
-                    self.move_to_wait_queue(task_id, current_tick, reason).await;
-                }
-                Ok(RuntimePoll::Exited(exit_code)) => {
-                    self.mark_state(task_id, TaskState::Exited(exit_code)).await;
-                    self.waiting_queue.write().await.remove(&task_id);
-                }
-                Err(error) => {
-                    self.mark_state(task_id, TaskState::Failed(error.to_string()))
-                        .await;
-                    self.waiting_queue.write().await.remove(&task_id);
-                }
-            }
+            self.execute_task(task_id, current_tick).await;
         }
         Ok(())
+    }
+
+    pub async fn run_task_once(&self, task_id: TaskId) -> Result<bool> {
+        let current_tick = self.advance_clock().await;
+        self.wake_sleeping_tasks(current_tick).await;
+
+        let mut ready_queue = self.ready_queue.write().await;
+        let Some(position) = ready_queue
+            .iter()
+            .position(|candidate| *candidate == task_id)
+        else {
+            return Ok(false);
+        };
+        ready_queue.remove(position);
+        drop(ready_queue);
+
+        self.execute_task(task_id, current_tick).await;
+        Ok(true)
+    }
+
+    async fn execute_task(&self, task_id: TaskId, current_tick: u64) {
+        let quantum_ms = self.quantum_ms();
+        self.mark_running(task_id, quantum_ms).await;
+        let outcome = self.runtime.resume(task_id, quantum_ms).await;
+        match outcome {
+            Ok(RuntimePoll::Ready) | Ok(RuntimePoll::Yielded) => {
+                self.requeue_task(task_id, TaskState::Yielded).await;
+            }
+            Ok(RuntimePoll::Waiting(reason)) => {
+                self.move_to_wait_queue(task_id, current_tick, reason).await;
+            }
+            Ok(RuntimePoll::Exited(exit_code)) => {
+                self.mark_state(task_id, TaskState::Exited(exit_code)).await;
+                self.waiting_queue.write().await.remove(&task_id);
+            }
+            Err(error) => {
+                self.mark_state(task_id, TaskState::Failed(error.to_string()))
+                    .await;
+                self.waiting_queue.write().await.remove(&task_id);
+            }
+        }
     }
 
     pub async fn run_ready_tasks(&self, rounds: usize) -> Result<()> {
@@ -142,8 +168,31 @@ impl Scheduler {
         self.tasks.read().await.values().cloned().collect()
     }
 
+    pub async fn kill(&self, task_id: TaskId) -> bool {
+        let exists = self.tasks.read().await.contains_key(&task_id);
+        if !exists {
+            return false;
+        }
+        self.waiting_queue.write().await.remove(&task_id);
+        self.ready_queue
+            .write()
+            .await
+            .retain(|candidate| *candidate != task_id);
+        self.mark_state(task_id, TaskState::Failed("killed by shell".to_string()))
+            .await;
+        true
+    }
+
     pub fn mode(&self) -> &SchedulingMode {
         &self.mode
+    }
+
+    pub async fn has_active_tasks(&self) -> bool {
+        self.tasks
+            .read()
+            .await
+            .values()
+            .any(|task| !matches!(task.state, TaskState::Exited(_) | TaskState::Failed(_)))
     }
 
     async fn advance_clock(&self) -> u64 {
@@ -236,5 +285,154 @@ impl Scheduler {
                 task.wait_channel = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::GuiSubsystem;
+    use crate::host::HostBridge;
+    use crate::network::NetworkSubsystem;
+    use crate::runtime::{AbiSelection, AbiStrategy, ProgramLaunchRequest, WasiOptions};
+    use crate::vfs::VirtualFileSystem;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_wasm(name: &str, wat_src: &str) -> String {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift should not break tests")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{name}_{nonce}.wasm"));
+        let wasm = wat::parse_str(wat_src).expect("wat should parse");
+        fs::write(&path, wasm).expect("fixture should write");
+        path.to_string_lossy().to_string()
+    }
+
+    fn scheduler_fixture(mode: SchedulingMode) -> Scheduler {
+        let host = Arc::new(HostBridge::detect());
+        let vfs = Arc::new(RwLock::new(VirtualFileSystem::new()));
+        let network = Arc::new(NetworkSubsystem::new(host.clone()));
+        let gui = Arc::new(GuiSubsystem::new(host.clone()));
+        let runtime =
+            Arc::new(WasmRuntime::new(host, vfs, network, gui).expect("runtime should initialize"));
+        Scheduler::new_with_mode(runtime, mode)
+    }
+
+    #[tokio::test]
+    async fn spawn_then_run_exits_task() {
+        let scheduler = scheduler_fixture(SchedulingMode::Cooperative);
+        let module_path = write_wasm(
+            "scheduler_exit",
+            r#"(module (func (export "wasmos_resume") (result i32) i32.const 0))"#,
+        );
+        let task_id = scheduler
+            .spawn(ProgramLaunchRequest {
+                name: "exit_once".to_string(),
+                module_path,
+                args: vec![],
+                env: BTreeMap::new(),
+                abi: AbiSelection {
+                    strategy: AbiStrategy::CustomOnly,
+                    wasi: WasiOptions::default(),
+                },
+            })
+            .await
+            .expect("spawn should succeed");
+
+        assert!(
+            scheduler
+                .run_task_once(task_id)
+                .await
+                .expect("run should succeed")
+        );
+        let task = scheduler
+            .list_tasks()
+            .await
+            .into_iter()
+            .find(|entry| entry.id == task_id)
+            .expect("task must exist");
+        assert!(
+            matches!(task.state, TaskState::Exited(0)),
+            "expected exit transition, got {:?}",
+            task.state
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_syscall_moves_task_to_waiting_then_wakes() {
+        let scheduler = scheduler_fixture(SchedulingMode::Cooperative);
+        let module_path = write_wasm(
+            "scheduler_sleep_wait",
+            r#"(module
+                (import "wasmos" "sleep_ms" (func $sleep (param i64) (result i32)))
+                (global $slept (mut i32) (i32.const 0))
+                (func (export "wasmos_resume") (result i32)
+                    global.get $slept
+                    i32.eqz
+                    if
+                        i64.const 2
+                        call $sleep
+                        drop
+                        i32.const 1
+                        global.set $slept
+                    end
+                    i32.const 0
+                )
+            )"#,
+        );
+        let task_id = scheduler
+            .spawn(ProgramLaunchRequest {
+                name: "sleeper".to_string(),
+                module_path,
+                args: vec![],
+                env: BTreeMap::new(),
+                abi: AbiSelection {
+                    strategy: AbiStrategy::CustomOnly,
+                    wasi: WasiOptions::default(),
+                },
+            })
+            .await
+            .expect("spawn should succeed");
+
+        scheduler
+            .run_task_once(task_id)
+            .await
+            .expect("run should succeed");
+        let waiting = scheduler
+            .list_tasks()
+            .await
+            .into_iter()
+            .find(|entry| entry.id == task_id)
+            .expect("task must exist after first run");
+        assert!(
+            matches!(
+                waiting.state,
+                TaskState::Waiting(WaitState::Sleeping { .. })
+            ),
+            "expected waiting/sleeping state, got {:?}",
+            waiting.state
+        );
+
+        scheduler
+            .tick()
+            .await
+            .expect("tick should advance scheduler");
+        scheduler
+            .tick()
+            .await
+            .expect("second tick should wake and run task");
+        let final_state = scheduler
+            .list_tasks()
+            .await
+            .into_iter()
+            .find(|entry| entry.id == task_id)
+            .expect("task must still be tracked");
+        assert!(
+            matches!(final_state.state, TaskState::Exited(0)),
+            "expected exited state after wake, got {:?}",
+            final_state.state
+        );
     }
 }

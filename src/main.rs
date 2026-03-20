@@ -1,6 +1,7 @@
 mod gui;
 mod host;
 mod network;
+mod os_error;
 mod program_api;
 mod runtime;
 mod scheduler;
@@ -16,6 +17,7 @@ use scheduler::Scheduler;
 use shell::Shell;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::time::{Duration, sleep};
 use tracing_subscriber::EnvFilter;
 use vfs::VirtualFileSystem;
 
@@ -36,7 +38,12 @@ async fn main() -> Result<()> {
         gui.clone(),
     )?);
     let scheduler = Arc::new(Scheduler::new(runtime));
-    let mut shell = Shell::new(scheduler, vfs, network, gui);
+    let mut shell = Shell::new(scheduler.clone(), vfs, network, gui);
 
-    shell.run().await
+    shell.run().await?;
+    while scheduler.has_active_tasks().await {
+        scheduler.run_ready_tasks(1).await?;
+        sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
