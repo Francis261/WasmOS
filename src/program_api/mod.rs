@@ -1,8 +1,14 @@
 use crate::gui::{DrawCommand, GuiEvent, WindowDescriptor};
 use crate::network::{HttpRequest, HttpResponse};
 use crate::runtime::RuntimeContext;
+use crate::vfs::VfsError;
 use anyhow::Result;
-use wasmtime::{Caller, Linker};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::str;
+use wasmtime::{Caller, Linker, Memory};
+
+const MAX_GUEST_BUFFER: usize = 64 * 1024;
 
 pub struct SystemCallRegistry;
 
@@ -14,7 +20,7 @@ impl SystemCallRegistry {
             |caller: Caller<'_, RuntimeContext>, ()| {
                 Box::new(async move {
                     let _ = caller.data().task_id;
-                    Ok(())
+                    Ok(AbiStatus::Ok.as_i32())
                 })
             },
         )?;
@@ -22,33 +28,133 @@ impl SystemCallRegistry {
         linker.func_wrap_async(
             "wasmos",
             "vfs_read",
-            |_caller: Caller<'_, RuntimeContext>, (_path_ptr, _path_len): (i32, i32)| {
-                Box::new(async move { Ok(0_i32) })
+            |mut caller: Caller<'_, RuntimeContext>,
+             (path_ptr, path_len, buf_ptr, buf_len, bytes_written_ptr): (
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+            )| {
+                let path = match read_guest_string(&mut caller, path_ptr, path_len) {
+                    Ok(path) => path,
+                    Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                };
+                let vfs = caller.data().vfs.clone();
+                Box::new(async move {
+                    let result = match vfs.read().await.read_file(path) {
+                        Ok(data) => {
+                            let max_len = match clamp_guest_len(buf_len) {
+                                Ok(value) => value,
+                                Err(error) => return Ok(error.status().as_i32()),
+                            };
+                            let bytes_to_write = data.len().min(max_len);
+                            if let Err(error) =
+                                write_guest_bytes(&mut caller, buf_ptr, &data[..bytes_to_write])
+                            {
+                                return Ok(error.status().as_i32());
+                            }
+                            if let Err(error) = write_guest_u32(
+                                &mut caller,
+                                bytes_written_ptr,
+                                bytes_to_write as u32,
+                            ) {
+                                return Ok(error.status().as_i32());
+                            }
+                            if bytes_to_write < data.len() {
+                                Err(AbiError::BufferTooSmall {
+                                    required: data.len(),
+                                    available: max_len,
+                                })
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(error) => Err(AbiError::from(error)),
+                    };
+                    Ok(status_from_result(result))
+                })
             },
         )?;
 
         linker.func_wrap_async(
             "wasmos",
             "vfs_write",
-            |_caller: Caller<'_, RuntimeContext>,
-             (_path_ptr, _path_len, _buf_ptr, _buf_len): (i32, i32, i32, i32)| {
-                Box::new(async move { Ok(0_i32) })
+            |mut caller: Caller<'_, RuntimeContext>,
+             (path_ptr, path_len, buf_ptr, buf_len): (i32, i32, i32, i32)| {
+                let path = match read_guest_string(&mut caller, path_ptr, path_len) {
+                    Ok(path) => path,
+                    Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                };
+                let content = match read_guest_bytes(&mut caller, buf_ptr, buf_len) {
+                    Ok(content) => content,
+                    Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                };
+                let vfs = caller.data().vfs.clone();
+                Box::new(async move {
+                    let result = vfs
+                        .write()
+                        .await
+                        .write_file(path, content)
+                        .map_err(AbiError::from);
+                    Ok(status_from_result(result))
+                })
             },
         )?;
 
         linker.func_wrap_async(
             "wasmos",
             "net_http",
-            |_caller: Caller<'_, RuntimeContext>, (_req_ptr, _req_len): (i32, i32)| {
-                Box::new(async move { Ok(0_i32) })
+            |mut caller: Caller<'_, RuntimeContext>,
+             (req_ptr, req_len, resp_ptr, resp_len, bytes_written_ptr): (
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+            )| {
+                let request: HttpRequest = match read_guest_struct(&mut caller, req_ptr, req_len) {
+                    Ok(request) => request,
+                    Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                };
+                let task_id = caller.data().task_id;
+                let network = caller.data().network.clone();
+                Box::new(async move {
+                    let response = match network.http_request(task_id, request).await {
+                        Ok(response) => response,
+                        Err(error) => return Ok(AbiError::from(error).status().as_i32()),
+                    };
+                    Ok(status_from_result(write_serialized_response(
+                        &mut caller,
+                        resp_ptr,
+                        resp_len,
+                        bytes_written_ptr,
+                        &response,
+                    )))
+                })
             },
         )?;
 
         linker.func_wrap_async(
             "wasmos",
             "gui_open_window",
-            |_caller: Caller<'_, RuntimeContext>, (_desc_ptr, _desc_len): (i32, i32)| {
-                Box::new(async move { Ok(1_i64) })
+            |mut caller: Caller<'_, RuntimeContext>,
+             (desc_ptr, desc_len, window_id_ptr): (i32, i32, i32)| {
+                let descriptor: WindowDescriptor =
+                    match read_guest_struct(&mut caller, desc_ptr, desc_len) {
+                        Ok(descriptor) => descriptor,
+                        Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                    };
+                let task_id = caller.data().task_id;
+                let gui = caller.data().gui.clone();
+                Box::new(async move {
+                    let window_id = gui.create_window(task_id, descriptor).await;
+                    Ok(status_from_result(write_guest_u64(
+                        &mut caller,
+                        window_id_ptr,
+                        window_id,
+                    )))
+                })
             },
         )?;
 
@@ -56,7 +162,222 @@ impl SystemCallRegistry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum AbiStatus {
+    Ok = 0,
+    InvalidArgument = 1,
+    InvalidUtf8 = 2,
+    MemoryOutOfBounds = 3,
+    BufferTooSmall = 4,
+    Serialization = 5,
+    NotFound = 6,
+    AlreadyExists = 7,
+    NotSupported = 8,
+    PermissionDenied = 9,
+    Internal = 255,
+}
+
+impl AbiStatus {
+    pub fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+#[derive(Debug)]
+pub enum AbiError {
+    InvalidArgument(String),
+    InvalidUtf8(std::str::Utf8Error),
+    MemoryOutOfBounds { ptr: usize, len: usize },
+    BufferTooSmall { required: usize, available: usize },
+    Serialization(String),
+    NotFound(String),
+    AlreadyExists(String),
+    NotSupported(String),
+    PermissionDenied(String),
+    Internal(String),
+}
+
+impl AbiError {
+    fn status(&self) -> AbiStatus {
+        match self {
+            Self::InvalidArgument(_) => AbiStatus::InvalidArgument,
+            Self::InvalidUtf8(_) => AbiStatus::InvalidUtf8,
+            Self::MemoryOutOfBounds { .. } => AbiStatus::MemoryOutOfBounds,
+            Self::BufferTooSmall { .. } => AbiStatus::BufferTooSmall,
+            Self::Serialization(_) => AbiStatus::Serialization,
+            Self::NotFound(_) => AbiStatus::NotFound,
+            Self::AlreadyExists(_) => AbiStatus::AlreadyExists,
+            Self::NotSupported(_) => AbiStatus::NotSupported,
+            Self::PermissionDenied(_) => AbiStatus::PermissionDenied,
+            Self::Internal(_) => AbiStatus::Internal,
+        }
+    }
+}
+
+impl From<VfsError> for AbiError {
+    fn from(value: VfsError) -> Self {
+        match value {
+            VfsError::NotFound(path) => Self::NotFound(path),
+            VfsError::AlreadyExists(path) => Self::AlreadyExists(path),
+            VfsError::NotAFile(path) => {
+                Self::InvalidArgument(format!("path is not a file: {path}"))
+            }
+        }
+    }
+}
+
+impl From<anyhow::Error> for AbiError {
+    fn from(value: anyhow::Error) -> Self {
+        let message = value.to_string();
+        if message.contains("not permitted") || message.contains("disabled for task") {
+            Self::PermissionDenied(message)
+        } else if message.contains("not implemented") {
+            Self::NotSupported(message)
+        } else {
+            Self::Internal(message)
+        }
+    }
+}
+
+fn status_from_result(result: Result<(), AbiError>) -> i32 {
+    match result {
+        Ok(()) => AbiStatus::Ok.as_i32(),
+        Err(error) => error.status().as_i32(),
+    }
+}
+
+pub fn read_guest_bytes(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    len: i32,
+) -> Result<Vec<u8>, AbiError> {
+    let ptr = clamp_guest_offset(ptr)?;
+    let len = clamp_guest_len(len)?;
+    let memory = guest_memory(caller)?;
+    ensure_memory_range(caller, &memory, ptr, len)?;
+
+    let mut buffer = vec![0_u8; len];
+    memory
+        .read(caller, ptr, &mut buffer)
+        .map_err(|_| AbiError::MemoryOutOfBounds { ptr, len })?;
+    Ok(buffer)
+}
+
+pub fn read_guest_string(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    len: i32,
+) -> Result<String, AbiError> {
+    let bytes = read_guest_bytes(caller, ptr, len)?;
+    let text = str::from_utf8(&bytes).map_err(AbiError::InvalidUtf8)?;
+    Ok(text.to_owned())
+}
+
+pub fn read_guest_struct<T: DeserializeOwned>(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    len: i32,
+) -> Result<T, AbiError> {
+    let bytes = read_guest_bytes(caller, ptr, len)?;
+    serde_json::from_slice(&bytes).map_err(|error| AbiError::Serialization(error.to_string()))
+}
+
+pub fn write_guest_bytes(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    data: &[u8],
+) -> Result<(), AbiError> {
+    let ptr = clamp_guest_offset(ptr)?;
+    let memory = guest_memory(caller)?;
+    ensure_memory_range(caller, &memory, ptr, data.len())?;
+    memory
+        .write(caller, ptr, data)
+        .map_err(|_| AbiError::MemoryOutOfBounds {
+            ptr,
+            len: data.len(),
+        })
+}
+
+pub fn write_guest_u32(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    value: u32,
+) -> Result<(), AbiError> {
+    write_guest_bytes(caller, ptr, &value.to_le_bytes())
+}
+
+pub fn write_guest_u64(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    value: u64,
+) -> Result<(), AbiError> {
+    write_guest_bytes(caller, ptr, &value.to_le_bytes())
+}
+
+fn write_serialized_response<T: Serialize>(
+    caller: &mut Caller<'_, RuntimeContext>,
+    ptr: i32,
+    len: i32,
+    bytes_written_ptr: i32,
+    value: &T,
+) -> Result<(), AbiError> {
+    let encoded =
+        serde_json::to_vec(value).map_err(|error| AbiError::Serialization(error.to_string()))?;
+    let capacity = clamp_guest_len(len)?;
+    let bytes_to_write = encoded.len().min(capacity);
+    write_guest_bytes(caller, ptr, &encoded[..bytes_to_write])?;
+    write_guest_u32(caller, bytes_written_ptr, bytes_to_write as u32)?;
+    if bytes_to_write < encoded.len() {
+        return Err(AbiError::BufferTooSmall {
+            required: encoded.len(),
+            available: capacity,
+        });
+    }
+    Ok(())
+}
+
+fn guest_memory(caller: &mut Caller<'_, RuntimeContext>) -> Result<Memory, AbiError> {
+    caller
+        .get_export("memory")
+        .and_then(|export| export.into_memory())
+        .ok_or(AbiError::NotSupported(
+            "guest module must export linear memory named `memory`".to_string(),
+        ))
+}
+
+fn ensure_memory_range(
+    caller: &mut Caller<'_, RuntimeContext>,
+    memory: &Memory,
+    ptr: usize,
+    len: usize,
+) -> Result<(), AbiError> {
+    let end = ptr
+        .checked_add(len)
+        .ok_or(AbiError::MemoryOutOfBounds { ptr, len })?;
+    if end > memory.data_size(caller) {
+        return Err(AbiError::MemoryOutOfBounds { ptr, len });
+    }
+    Ok(())
+}
+
+fn clamp_guest_offset(ptr: i32) -> Result<usize, AbiError> {
+    usize::try_from(ptr)
+        .map_err(|_| AbiError::InvalidArgument("pointer must be non-negative".to_string()))
+}
+
+fn clamp_guest_len(len: i32) -> Result<usize, AbiError> {
+    let len = usize::try_from(len)
+        .map_err(|_| AbiError::InvalidArgument("length must be non-negative".to_string()))?;
+    if len > MAX_GUEST_BUFFER {
+        return Err(AbiError::InvalidArgument(
+            "length exceeds syscall ABI limit".to_string(),
+        ));
+    }
+    Ok(len)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuestApi;
 
 impl GuestApi {
