@@ -2,7 +2,7 @@ use crate::gui::GuiSubsystem;
 use crate::network::{NetworkSubsystem, SocketPolicy};
 use crate::runtime::{AbiSelection, ProgramLaunchRequest};
 use crate::scheduler::{Scheduler, TaskState};
-use crate::vfs::VirtualFileSystem;
+use crate::vfs::{TaskVfsPolicy, VirtualFileSystem};
 use anyhow::{Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -377,6 +377,13 @@ impl Shell {
                             },
                         )
                         .await;
+                    self.vfs.write().await.set_task_policy(
+                        task_id,
+                        TaskVfsPolicy {
+                            allow_delete: true,
+                            ..TaskVfsPolicy::default()
+                        },
+                    );
                     self.scheduler.run_ready_tasks(4).await?;
                     Ok(self.package_execution_summary(task_id, &package.name).await)
                 } else {
