@@ -1,7 +1,7 @@
 use crate::gui::GuiSubsystem;
 use crate::network::NetworkSubsystem;
 use crate::runtime::{AbiSelection, ProgramLaunchRequest};
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, TaskState};
 use crate::vfs::VirtualFileSystem;
 use anyhow::{Result, bail};
 use reqwest::Client;
@@ -368,10 +368,7 @@ impl Shell {
                         })
                         .await?;
                     self.scheduler.run_ready_tasks(4).await?;
-                    Ok(format!(
-                        "executed package {} as task {task_id}",
-                        package.name
-                    ))
+                    Ok(self.package_execution_summary(task_id, &package.name).await)
                 } else {
                     Ok(format!("unknown command: {unknown}"))
                 }
@@ -958,6 +955,35 @@ impl Shell {
             }
         }
         Ok(format!("editor ended for {path}"))
+    }
+
+    async fn package_execution_summary(&self, task_id: u64, package_name: &str) -> String {
+        let task = self
+            .scheduler
+            .list_tasks()
+            .await
+            .into_iter()
+            .find(|task| task.id == task_id);
+        let Some(task) = task else {
+            return format!("executed package {package_name} as task {task_id}");
+        };
+        match task.state {
+            TaskState::Exited(0) => format!("executed package {package_name} as task {task_id}"),
+            TaskState::Exited(code) => {
+                format!("package {package_name} exited with code {code} (task {task_id})")
+            }
+            TaskState::Failed(reason) => {
+                let mut message =
+                    format!("package {package_name} failed (task {task_id}): {reason}");
+                if reason.contains("PermissionDenied") {
+                    message.push_str(
+                        ". hint: enable task network capabilities with `net policy capability <task_id> remote on` and `net policy capability <task_id> http on`",
+                    );
+                }
+                message
+            }
+            state => format!("executed package {package_name} as task {task_id} ({state:?})"),
+        }
     }
 }
 
