@@ -1,6 +1,6 @@
 use crate::gui::GuiSubsystem;
 use crate::network::NetworkSubsystem;
-use crate::runtime::ProgramLaunchRequest;
+use crate::runtime::{AbiSelection, ProgramLaunchRequest};
 use crate::scheduler::Scheduler;
 use crate::vfs::VirtualFileSystem;
 use anyhow::Result;
@@ -71,6 +71,7 @@ impl Shell {
                         module_path,
                         args,
                         env: BTreeMap::new(),
+                        abi: AbiSelection::default(),
                     })
                     .await?;
                 self.scheduler.tick().await?;

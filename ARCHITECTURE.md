@@ -27,6 +27,19 @@
 - `VirtualFileSystem` decouples virtual paths from host paths and only exposes mapped host metadata explicitly.
 - GUI access is command/event based, so guests cannot access host hardware directly.
 
+
+## ABI strategy
+
+WasmOS now models guest execution as a **hybrid WASI + custom import** system:
+
+- **WASI (`wasi_snapshot_preview1`)** remains the default process ABI for standard entrypoints, argv/env delivery, and stdio-style behavior.
+- **Custom `wasmos::*` imports** remain the capability boundary for the virtual filesystem, policy-gated networking, and GUI/windowing services.
+- **Per-program ABI selection** is explicit through `ProgramLaunchRequest.abi`, which supports:
+  - `PureWasi` for CLI-style programs that only need WASI behavior.
+  - `CustomOnly` for sandboxed programs that should avoid direct WASI imports.
+  - `Hybrid` for programs that combine WASI process semantics with WasmOS-specific capabilities.
+- The runtime validates module imports against the selected ABI strategy before instantiation, preventing accidental mixing of unsupported interfaces.
+
 ## Expansion points
 
 - Swap in a real rendering backend behind `GuiSubsystem::draw`.
