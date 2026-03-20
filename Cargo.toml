@@ -1,0 +1,16 @@
+[package]
+name = "wasmos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+url = { version = "2.5", features = ["serde"] }
+wasmtime = "31.0"
+wasmtime-wasi = "31.0"
