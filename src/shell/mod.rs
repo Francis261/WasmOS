@@ -1,5 +1,5 @@
 use crate::gui::GuiSubsystem;
-use crate::network::NetworkSubsystem;
+use crate::network::{NetworkSubsystem, SocketPolicy};
 use crate::runtime::{AbiSelection, ProgramLaunchRequest};
 use crate::scheduler::{Scheduler, TaskState};
 use crate::vfs::VirtualFileSystem;
@@ -367,6 +367,16 @@ impl Shell {
                             abi: AbiSelection::default(),
                         })
                         .await?;
+                    self.network
+                        .set_policy(
+                            task_id,
+                            SocketPolicy {
+                                allow_remote: true,
+                                allow_http: true,
+                                ..SocketPolicy::default()
+                            },
+                        )
+                        .await;
                     self.scheduler.run_ready_tasks(4).await?;
                     Ok(self.package_execution_summary(task_id, &package.name).await)
                 } else {
