@@ -62,7 +62,10 @@ The shell prompt uses a colored user/host style and reflects current directory:
 
 - `pkg host add <url>`: register a remote package host (`<url>/packages.json` is expected)
 - `pkg host list`
+- `pkg update`: refresh local package catalog from all registered hosts
 - `pkg install <program>`
+- `pkg upgrade`: upgrade all installed programs to latest catalog versions
+- `pkg upgrade <program>`: upgrade one program
 - `pkg remove <program>`
 - `pkg list`
 

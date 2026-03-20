@@ -34,12 +34,20 @@ struct InstalledPackage {
     name: String,
     module_path: String,
     dependencies: Vec<String>,
+    #[serde(default = "default_version")]
+    version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PackageCatalogEntry {
     module_path: String,
     dependencies: Vec<String>,
+    #[serde(default = "default_version")]
+    version: String,
+}
+
+fn default_version() -> String {
+    "0.0.0".to_string()
 }
 
 impl Shell {
@@ -88,9 +96,27 @@ impl Shell {
             if line == "exit" {
                 break;
             }
-            let response = match self.handle_command(line).await {
-                Ok(response) => response,
-                Err(error) => format!("error: {error}"),
+            let response = if line.contains("&&") {
+                let mut messages = Vec::new();
+                for chunk in line
+                    .split("&&")
+                    .map(str::trim)
+                    .filter(|cmd| !cmd.is_empty())
+                {
+                    match self.handle_command(chunk).await {
+                        Ok(message) => messages.push(message),
+                        Err(error) => {
+                            messages.push(format!("error: {error}"));
+                            break;
+                        }
+                    }
+                }
+                messages.join("\n")
+            } else {
+                match self.handle_command(line).await {
+                    Ok(response) => response,
+                    Err(error) => format!("error: {error}"),
+                }
             };
             stdout.write_all(response.as_bytes()).await?;
             stdout.write_all(b"\n").await?;
@@ -478,7 +504,7 @@ impl Shell {
                 }
                 Ok(installed
                     .values()
-                    .map(|pkg| format!("{} -> {}", pkg.name, pkg.module_path))
+                    .map(|pkg| format!("{} {} -> {}", pkg.name, pkg.version, pkg.module_path))
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
@@ -487,13 +513,9 @@ impl Shell {
                     .get(1)
                     .copied()
                     .ok_or_else(|| anyhow::anyhow!("pkg install <program>"))?;
-                let mut catalog = self.load_package_catalog().unwrap_or_default();
+                let catalog = self.load_package_catalog().unwrap_or_default();
                 if !catalog.contains_key(package) {
-                    for host in self.package_hosts.lock().await.clone() {
-                        if let Ok(remote) = self.fetch_remote_catalog(&host).await {
-                            catalog.extend(remote);
-                        }
-                    }
+                    bail!("package `{package}` not found in catalog. run `pkg update` first");
                 }
                 let mut planned = Vec::new();
                 self.resolve_dependencies(&catalog, package, &mut planned)?;
@@ -509,12 +531,108 @@ impl Shell {
                                 name: name.clone(),
                                 module_path: entry.module_path.clone(),
                                 dependencies: entry.dependencies.clone(),
+                                version: entry.version.clone(),
                             },
                         );
                     }
                 }
                 self.persist_package_registry().await?;
                 Ok(format!("installed {package}"))
+            }
+            "update" => {
+                let hosts = self.package_hosts.lock().await.clone();
+                if hosts.is_empty() {
+                    bail!("no package hosts configured. use `pkg host add <url>` first");
+                }
+                let mut merged = BTreeMap::<String, PackageCatalogEntry>::new();
+                let mut ok = 0usize;
+                let mut bad = 0usize;
+                let mut status_lines = Vec::new();
+                status_lines.push("Updating package metadata...".to_string());
+                for host in hosts {
+                    match self.fetch_remote_catalog(&host).await {
+                        Ok(catalog) => {
+                            ok += 1;
+                            status_lines.push(format!("[ok] {host} ({} packages)", catalog.len()));
+                            for (name, entry) in catalog {
+                                let replace = merged
+                                    .get(&name)
+                                    .map(|current| {
+                                        is_newer_version(&entry.version, &current.version)
+                                    })
+                                    .unwrap_or(true);
+                                if replace {
+                                    merged.insert(name, entry);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            bad += 1;
+                            status_lines.push(format!("[bad] {host} ({error})"));
+                        }
+                    }
+                }
+                let payload = serde_json::to_string_pretty(&merged)?;
+                fs::write(&self.package_catalog_path, payload)?;
+                status_lines.push(format!(
+                    "Done. hosts ok: {ok}, bad: {bad}, catalog packages: {}",
+                    merged.len()
+                ));
+                Ok(status_lines.join("\n"))
+            }
+            "upgrade" => {
+                let target = args.get(1).copied();
+                let catalog = self.load_package_catalog().unwrap_or_default();
+                if catalog.is_empty() {
+                    bail!("catalog is empty. run `pkg update` first");
+                }
+                let mut installed = self.package_registry.lock().await;
+                let names = if let Some(name) = target {
+                    vec![name.to_string()]
+                } else {
+                    installed.keys().cloned().collect::<Vec<_>>()
+                };
+                if names.is_empty() {
+                    return Ok("no installed packages".to_string());
+                }
+                let mut updated = 0usize;
+                let mut up_to_date = 0usize;
+                let mut lines = vec!["Upgrading packages...".to_string()];
+                for name in names {
+                    let Some(current) = installed.get(&name).cloned() else {
+                        lines.push(format!("[skip] {name} not installed"));
+                        continue;
+                    };
+                    let Some(remote) = catalog.get(&name) else {
+                        lines.push(format!("[skip] {name} missing from catalog"));
+                        continue;
+                    };
+                    if is_newer_version(&remote.version, &current.version) {
+                        installed.insert(
+                            name.clone(),
+                            InstalledPackage {
+                                name: name.clone(),
+                                module_path: remote.module_path.clone(),
+                                dependencies: remote.dependencies.clone(),
+                                version: remote.version.clone(),
+                            },
+                        );
+                        updated += 1;
+                        lines.push(format!(
+                            "[updated] {name} {} -> {}",
+                            current.version, remote.version
+                        ));
+                    } else {
+                        up_to_date += 1;
+                        lines.push(format!("[ok] {name} is up to date ({})", current.version));
+                    }
+                }
+                drop(installed);
+                self.persist_package_registry().await?;
+                lines.push(format!(
+                    "Upgrade complete. updated: {updated}, up-to-date: {up_to_date}"
+                ));
+                Ok(lines.join("\n"))
             }
             "remove" => {
                 let package = args
@@ -821,6 +939,29 @@ fn normalize_path(path: &str) -> String {
     } else {
         format!("/{}", components.join("/"))
     }
+}
+
+fn is_newer_version(candidate: &str, current: &str) -> bool {
+    fn parse(version: &str) -> Vec<u32> {
+        version
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or_default())
+            .collect::<Vec<_>>()
+    }
+    let candidate = parse(candidate);
+    let current = parse(current);
+    let max_len = candidate.len().max(current.len());
+    for index in 0..max_len {
+        let left = *candidate.get(index).unwrap_or(&0);
+        let right = *current.get(index).unwrap_or(&0);
+        if left > right {
+            return true;
+        }
+        if left < right {
+            return false;
+        }
+    }
+    false
 }
 
 fn parse_u64(value: Option<&str>, usage: &str) -> Result<u64> {

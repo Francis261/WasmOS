@@ -28,6 +28,7 @@ if (!fs.existsSync(catalogPath)) {
         "text-editor": {
           module_path: `http://127.0.0.1:${PORT}/programs/text_editor.wasm`,
           dependencies: [],
+          version: "1.0.0",
         },
       },
       null,

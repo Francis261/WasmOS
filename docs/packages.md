@@ -24,9 +24,13 @@ Example payload:
 ## Shell commands
 
 - `pkg host add http://127.0.0.1:4010`
+- `pkg host remove http://127.0.0.1:4010`
 - `pkg host list`
+- `pkg update` (checks all hosts, marks each host `[ok]` or `[bad]`, refreshes local catalog)
 - `pkg install text-editor`
 - `pkg list`
+- `pkg upgrade` (upgrade all installed packages that have newer versions)
+- `pkg upgrade text-editor` (upgrade one package)
 - `pkg remove text-editor`
 
 Installed package names become executable commands in the shell.
@@ -36,3 +40,10 @@ Installed package names become executable commands in the shell.
 - `.wasmos_packages.json` stores installed packages.
 - `.wasmos_pkg_hosts.json` stores configured package hosts.
 - `.wasmos_pkg_catalog.json` can be used as a local fallback catalog.
+
+## Versioning behavior
+
+- Catalog entries include a `version` field.
+- `pkg update` refreshes package metadata only.
+- `pkg upgrade` applies metadata updates to installed programs.
+- Up-to-date packages are skipped with an explicit message.
