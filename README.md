@@ -11,7 +11,7 @@ It is organized in explicit layers:
 
 ## Repository layout
 
-- `src/shell`: command parser/dispatcher for launching and controlling tasks.
+- `src/shell`: command parser/dispatcher for launching and controlling tasks, including persistent per-program policy profiles.
 - `src/scheduler`: ready/wait queues, task states, cooperative + preemptive scheduling.
 - `src/runtime`: Wasmtime-based loading/instantiation/resume, ABI checks, fuel accounting.
 - `src/program_api`: host function registrations exposed as `wasmos::*` imports.
@@ -70,6 +70,17 @@ The shell prompt uses a colored user/host style and reflects current directory:
 - `pkg list`
 
 Installed packages can be executed directly by name.
+
+### Program-scoped policies
+
+Network policies can be stored per program so toggling one package does not affect others:
+
+- `net policy show program <program>`
+- `net policy capability program <program> <http|ws|tcp|remote> <on|off>`
+- `net policy allow program <program> <host>`
+- `net policy deny program <program> <host>`
+
+Those settings are persisted in `.wasmos_program_policies.json` and are applied automatically each time that program is launched.
 
 ### Built-in editor
 

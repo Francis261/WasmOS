@@ -25,10 +25,12 @@ pub struct Shell {
     package_registry_path: String,
     package_catalog_path: String,
     package_hosts_path: String,
+    program_policy_path: String,
     package_cache_dir: String,
     command_aliases: Mutex<BTreeMap<String, String>>,
     package_registry: Mutex<BTreeMap<String, InstalledPackage>>,
     package_hosts: Mutex<Vec<String>>,
+    program_policies: Mutex<BTreeMap<String, ProgramPolicyProfile>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,14 @@ struct PackageCatalogEntry {
     dependencies: Vec<String>,
     #[serde(default = "default_version")]
     version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProgramPolicyProfile {
+    #[serde(default)]
+    network: SocketPolicy,
+    #[serde(default)]
+    vfs: TaskVfsPolicy,
 }
 
 fn default_version() -> String {
@@ -71,10 +81,12 @@ impl Shell {
             package_registry_path: ".wasmos_packages.json".to_string(),
             package_catalog_path: ".wasmos_pkg_catalog.json".to_string(),
             package_hosts_path: ".wasmos_pkg_hosts.json".to_string(),
+            program_policy_path: ".wasmos_program_policies.json".to_string(),
             package_cache_dir: ".wasmos_pkg_cache".to_string(),
             command_aliases: Mutex::new(BTreeMap::new()),
             package_registry: Mutex::new(BTreeMap::new()),
             package_hosts: Mutex::new(vec![]),
+            program_policies: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -161,14 +173,7 @@ impl Shell {
                 let module_path = parts.next().unwrap_or_default().to_string();
                 let args = parts.map(ToString::to_string).collect::<Vec<_>>();
                 let task_id = self
-                    .scheduler
-                    .spawn(ProgramLaunchRequest {
-                        name: module_path.clone(),
-                        module_path,
-                        args,
-                        env: BTreeMap::new(),
-                        abi: AbiSelection::default(),
-                    })
+                    .spawn_program(module_path.clone(), module_path, args)
                     .await?;
                 Ok(format!("spawned task {task_id}"))
             }
@@ -176,14 +181,7 @@ impl Shell {
                 let module_path = parts.next().unwrap_or_default().to_string();
                 let args = parts.map(ToString::to_string).collect::<Vec<_>>();
                 let task_id = self
-                    .scheduler
-                    .spawn(ProgramLaunchRequest {
-                        name: module_path.clone(),
-                        module_path,
-                        args,
-                        env: BTreeMap::new(),
-                        abi: AbiSelection::default(),
-                    })
+                    .spawn_program(module_path.clone(), module_path, args)
                     .await?;
                 self.scheduler.run_ready_tasks(4).await?;
                 Ok(format!("spawned task {task_id} and executed 4 rounds"))
@@ -303,14 +301,11 @@ impl Shell {
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("bg <module.wasm>"))?;
                 let task_id = self
-                    .scheduler
-                    .spawn(ProgramLaunchRequest {
-                        name: module_path.to_string(),
-                        module_path: module_path.to_string(),
-                        args: parts.map(ToString::to_string).collect(),
-                        env: BTreeMap::new(),
-                        abi: AbiSelection::default(),
-                    })
+                    .spawn_program(
+                        module_path.to_string(),
+                        module_path.to_string(),
+                        parts.map(ToString::to_string).collect(),
+                    )
                     .await?;
                 Ok(format!("background task {task_id} started"))
             }
@@ -358,32 +353,12 @@ impl Shell {
             unknown => {
                 if let Some(package) = self.package_registry.lock().await.get(unknown).cloned() {
                     let task_id = self
-                        .scheduler
-                        .spawn(ProgramLaunchRequest {
-                            name: package.name.clone(),
-                            module_path: package.module_path,
-                            args: parts.map(ToString::to_string).collect(),
-                            env: BTreeMap::new(),
-                            abi: AbiSelection::default(),
-                        })
-                        .await?;
-                    self.network
-                        .set_policy(
-                            task_id,
-                            SocketPolicy {
-                                allow_remote: true,
-                                allow_http: true,
-                                ..SocketPolicy::default()
-                            },
+                        .spawn_program(
+                            package.name.clone(),
+                            package.module_path,
+                            parts.map(ToString::to_string).collect(),
                         )
-                        .await;
-                    self.vfs.write().await.set_task_policy(
-                        task_id,
-                        TaskVfsPolicy {
-                            allow_delete: true,
-                            ..TaskVfsPolicy::default()
-                        },
-                    );
+                        .await?;
                     self.scheduler.run_ready_tasks(4).await?;
                     Ok(self.package_execution_summary(task_id, &package.name).await)
                 } else {
@@ -398,54 +373,123 @@ impl Shell {
             bail!("net policy <show|allow|deny|capability> ...")
         }
         match args.get(1).copied().unwrap_or_default() {
-            "show" => {
-                let task_id = parse_u64(args.get(2).copied(), "net policy show <task_id>")?;
-                let policy = self.network.policy(task_id).await;
-                Ok(format!("{:?}", policy))
-            }
-            "allow" => {
-                let task_id = parse_u64(args.get(2).copied(), "net policy allow <task_id> <host>")?;
-                let host = args
-                    .get(3)
-                    .copied()
-                    .ok_or_else(|| anyhow::anyhow!("host required"))?;
-                let mut policy = self.network.policy(task_id).await;
-                if !policy.allowed_hosts.iter().any(|entry| entry == host) {
-                    policy.allowed_hosts.push(host.to_string());
+            "show" => match args.get(2).copied().unwrap_or_default() {
+                "program" => {
+                    let program = args
+                        .get(3)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("net policy show program <program>"))?;
+                    let policy = self.program_policy(program).await.network;
+                    Ok(format!("{:?}", policy))
                 }
-                self.network.set_policy(task_id, policy).await;
-                Ok(format!("allowed host {host} for task {task_id}"))
+                value => {
+                    let task_id = parse_u64(Some(value), "net policy show <task_id>")?;
+                    let policy = self.network.policy(task_id).await;
+                    Ok(format!("{:?}", policy))
+                }
+            },
+            "allow" => {
+                if args.get(2).copied() == Some("program") {
+                    let program = args.get(3).copied().ok_or_else(|| {
+                        anyhow::anyhow!("net policy allow program <program> <host>")
+                    })?;
+                    let host = args
+                        .get(4)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("host required"))?;
+                    self.update_program_policy(program, |policy| {
+                        if !policy
+                            .network
+                            .allowed_hosts
+                            .iter()
+                            .any(|entry| entry == host)
+                        {
+                            policy.network.allowed_hosts.push(host.to_string());
+                        }
+                    })
+                    .await?;
+                    Ok(format!("allowed host {host} for program {program}"))
+                } else {
+                    let task_id =
+                        parse_u64(args.get(2).copied(), "net policy allow <task_id> <host>")?;
+                    let host = args
+                        .get(3)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("host required"))?;
+                    let mut policy = self.network.policy(task_id).await;
+                    if !policy.allowed_hosts.iter().any(|entry| entry == host) {
+                        policy.allowed_hosts.push(host.to_string());
+                    }
+                    self.network.set_policy(task_id, policy).await;
+                    Ok(format!("allowed host {host} for task {task_id}"))
+                }
             }
             "deny" => {
-                let task_id = parse_u64(args.get(2).copied(), "net policy deny <task_id> <host>")?;
-                let host = args
-                    .get(3)
-                    .copied()
-                    .ok_or_else(|| anyhow::anyhow!("host required"))?;
-                let mut policy = self.network.policy(task_id).await;
-                if !policy.denied_hosts.iter().any(|entry| entry == host) {
-                    policy.denied_hosts.push(host.to_string());
+                if args.get(2).copied() == Some("program") {
+                    let program = args.get(3).copied().ok_or_else(|| {
+                        anyhow::anyhow!("net policy deny program <program> <host>")
+                    })?;
+                    let host = args
+                        .get(4)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("host required"))?;
+                    self.update_program_policy(program, |policy| {
+                        if !policy
+                            .network
+                            .denied_hosts
+                            .iter()
+                            .any(|entry| entry == host)
+                        {
+                            policy.network.denied_hosts.push(host.to_string());
+                        }
+                    })
+                    .await?;
+                    Ok(format!("denied host {host} for program {program}"))
+                } else {
+                    let task_id =
+                        parse_u64(args.get(2).copied(), "net policy deny <task_id> <host>")?;
+                    let host = args
+                        .get(3)
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("host required"))?;
+                    let mut policy = self.network.policy(task_id).await;
+                    if !policy.denied_hosts.iter().any(|entry| entry == host) {
+                        policy.denied_hosts.push(host.to_string());
+                    }
+                    self.network.set_policy(task_id, policy).await;
+                    Ok(format!("denied host {host} for task {task_id}"))
                 }
-                self.network.set_policy(task_id, policy).await;
-                Ok(format!("denied host {host} for task {task_id}"))
             }
             "capability" => {
-                let task_id = parse_u64(
-                    args.get(2).copied(),
-                    "net policy capability <task_id> <http|ws|tcp|remote> <on|off>",
-                )?;
-                let capability = args.get(3).copied().unwrap_or_default();
-                let enabled = matches!(args.get(4).copied().unwrap_or("off"), "on" | "true" | "1");
-                let mut policy = self.network.policy(task_id).await;
-                match capability {
-                    "http" => policy.allow_http = enabled,
-                    "ws" => policy.allow_websocket = enabled,
-                    "tcp" => policy.allow_tcp = enabled,
-                    "remote" => policy.allow_remote = enabled,
-                    _ => bail!("unknown capability: {capability}"),
+                if args.get(2).copied() == Some("program") {
+                    let program = args.get(3).copied().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "net policy capability program <program> <http|ws|tcp|remote> <on|off>"
+                        )
+                    })?;
+                    let capability = args.get(4).copied().unwrap_or_default();
+                    let enabled =
+                        matches!(args.get(5).copied().unwrap_or("off"), "on" | "true" | "1");
+                    validate_network_capability(capability)?;
+                    self.update_program_policy(program, |policy| {
+                        apply_network_capability(&mut policy.network, capability, enabled)
+                    })
+                    .await?;
+                    Ok(format!("set {capability}={enabled} for program {program}"))
+                } else {
+                    let task_id = parse_u64(
+                        args.get(2).copied(),
+                        "net policy capability <task_id> <http|ws|tcp|remote> <on|off>",
+                    )?;
+                    let capability = args.get(3).copied().unwrap_or_default();
+                    let enabled =
+                        matches!(args.get(4).copied().unwrap_or("off"), "on" | "true" | "1");
+                    let mut policy = self.network.policy(task_id).await;
+                    validate_network_capability(capability)?;
+                    apply_network_capability(&mut policy, capability, enabled);
+                    self.network.set_policy(task_id, policy).await;
+                    Ok(format!("set {capability}={enabled} for task {task_id}"))
                 }
-                self.network.set_policy(task_id, policy).await;
-                Ok(format!("set {capability}={enabled} for task {task_id}"))
             }
             _ => bail!("net policy <show|allow|deny|capability> ..."),
         }
@@ -693,6 +737,7 @@ impl Shell {
         self.load_vfs_snapshot().await?;
         self.load_package_registry().await?;
         self.load_package_hosts().await?;
+        self.load_program_policies().await?;
         self.run_startup_script().await
     }
 
@@ -886,6 +931,80 @@ impl Shell {
         let payload = serde_json::to_string_pretty(&*self.package_hosts.lock().await)?;
         fs::write(&self.package_hosts_path, payload)?;
         Ok(())
+    }
+
+    async fn load_program_policies(&self) -> Result<()> {
+        let payload = match fs::read_to_string(&self.program_policy_path) {
+            Ok(payload) => payload,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.program_policies.lock().await.clear();
+                return Ok(());
+            }
+            Err(error) => return Err(anyhow::anyhow!(error.to_string())),
+        };
+        let policies: BTreeMap<String, ProgramPolicyProfile> = serde_json::from_str(&payload)?;
+        *self.program_policies.lock().await = policies;
+        Ok(())
+    }
+
+    async fn persist_program_policies(&self) -> Result<()> {
+        let payload = serde_json::to_string_pretty(&*self.program_policies.lock().await)?;
+        fs::write(&self.program_policy_path, payload)?;
+        Ok(())
+    }
+
+    async fn spawn_program(
+        &self,
+        name: String,
+        module_path: String,
+        args: Vec<String>,
+    ) -> Result<u64> {
+        let task_id = self
+            .scheduler
+            .spawn(ProgramLaunchRequest {
+                name: name.clone(),
+                module_path: module_path.clone(),
+                args,
+                env: BTreeMap::new(),
+                abi: AbiSelection::default(),
+            })
+            .await?;
+        self.apply_program_policy(&name, task_id).await?;
+        if name != module_path {
+            self.apply_program_policy(&module_path, task_id).await?;
+        }
+        Ok(task_id)
+    }
+
+    async fn apply_program_policy(&self, program: &str, task_id: u64) -> Result<()> {
+        let Some(profile) = self.program_policies.lock().await.get(program).cloned() else {
+            return Ok(());
+        };
+        self.network.set_policy(task_id, profile.network).await;
+        self.vfs.write().await.set_task_policy(task_id, profile.vfs);
+        Ok(())
+    }
+
+    async fn program_policy(&self, program: &str) -> ProgramPolicyProfile {
+        self.program_policies
+            .lock()
+            .await
+            .get(program)
+            .cloned()
+            .unwrap_or_else(default_program_policy_profile)
+    }
+
+    async fn update_program_policy<F>(&self, program: &str, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut ProgramPolicyProfile),
+    {
+        let mut policies = self.program_policies.lock().await;
+        let profile = policies
+            .entry(program.to_string())
+            .or_insert_with(default_program_policy_profile);
+        update(profile);
+        drop(policies);
+        self.persist_program_policies().await
     }
 
     async fn render_resource_overview(&self) -> Result<String> {
@@ -1098,6 +1217,7 @@ mod tests {
         shell.package_registry_path = format!("/tmp/wasmos_test_pkg_registry_{nonce}.json");
         shell.package_catalog_path = format!("/tmp/wasmos_test_pkg_catalog_{nonce}.json");
         shell.package_hosts_path = format!("/tmp/wasmos_test_pkg_hosts_{nonce}.json");
+        shell.program_policy_path = format!("/tmp/wasmos_test_program_policy_{nonce}.json");
         shell.startup_script_path = format!("/tmp/wasmos_test_startup_{nonce}.rc");
         shell
     }
@@ -1179,5 +1299,62 @@ mod tests {
         assert_eq!(sanitize_path_component("cli-welcome"), "cli-welcome");
         assert_eq!(sanitize_path_component("1.2.3"), "1_2_3");
         assert_eq!(sanitize_path_component("pkg/name"), "pkg_name");
+    }
+
+    #[tokio::test]
+    async fn program_policy_is_persisted_separately_from_task_policy() {
+        let shell = shell_fixture();
+        shell
+            .handle_command("net policy capability program http-fetch remote on")
+            .await
+            .expect("program policy update should succeed");
+        shell
+            .handle_command("net policy capability program http-fetch http on")
+            .await
+            .expect("program policy update should succeed");
+        shell
+            .handle_command("net policy capability program file-ops remote off")
+            .await
+            .expect("independent program policy should succeed");
+
+        let http_fetch = shell
+            .handle_command("net policy show program http-fetch")
+            .await
+            .expect("show should succeed");
+        let file_ops = shell
+            .handle_command("net policy show program file-ops")
+            .await
+            .expect("show should succeed");
+
+        assert!(http_fetch.contains("allow_remote: true"));
+        assert!(http_fetch.contains("allow_http: true"));
+        assert!(file_ops.contains("allow_remote: false"));
+    }
+}
+
+fn validate_network_capability(capability: &str) -> Result<()> {
+    match capability {
+        "http" | "ws" | "tcp" | "remote" => Ok(()),
+        _ => bail!("unknown capability: {capability}"),
+    }
+}
+
+fn apply_network_capability(policy: &mut SocketPolicy, capability: &str, enabled: bool) {
+    match capability {
+        "http" => policy.allow_http = enabled,
+        "ws" => policy.allow_websocket = enabled,
+        "tcp" => policy.allow_tcp = enabled,
+        "remote" => policy.allow_remote = enabled,
+        _ => {}
+    }
+}
+
+fn default_program_policy_profile() -> ProgramPolicyProfile {
+    ProgramPolicyProfile {
+        network: SocketPolicy::default(),
+        vfs: TaskVfsPolicy {
+            allow_delete: true,
+            ..TaskVfsPolicy::default()
+        },
     }
 }
