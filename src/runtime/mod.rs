@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use wasmtime::{Config, Engine, Linker, Module, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::preview1::WasiP1Ctx;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramLaunchRequest {
@@ -58,9 +59,14 @@ impl Default for WasiOptions {
     }
 }
 
-#[derive(Debug)]
 pub struct RuntimeWasi {
-    ctx: WasiCtx,
+    ctx: WasiP1Ctx,
+}
+
+impl std::fmt::Debug for RuntimeWasi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeWasi").finish_non_exhaustive()
+    }
 }
 
 impl RuntimeWasi {
@@ -69,19 +75,72 @@ impl RuntimeWasi {
         if request.abi.wasi.inherit_stdio {
             builder.inherit_stdio();
         }
-        builder.args(&request.args)?;
+        builder.args(&request.args);
         if request.abi.wasi.expose_cli_environment {
             for (key, value) in &request.env {
-                builder.env(key, value)?;
+                builder.env(key, value);
             }
         }
         Ok(Self {
-            ctx: builder.build(),
+            ctx: builder.build_p1(),
         })
     }
 
-    pub fn ctx(&mut self) -> &mut WasiCtx {
+    pub fn ctx(&mut self) -> &mut WasiP1Ctx {
         &mut self.ctx
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeBlockReason {
+    Sleep { duration_ms: u64 },
+    Io { channel: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimePoll {
+    Ready,
+    Yielded,
+    Waiting(RuntimeBlockReason),
+    Exited(i32),
+}
+
+#[derive(Debug, Default)]
+pub struct TaskRuntimeControl {
+    pub requested_yield: bool,
+    pub block_reason: Option<RuntimeBlockReason>,
+    pub last_quantum_ms: u64,
+    pub resume_count: u64,
+}
+
+impl TaskRuntimeControl {
+    pub fn reset_for_quantum(&mut self, quantum_ms: u64) {
+        self.requested_yield = false;
+        self.block_reason = None;
+        self.last_quantum_ms = quantum_ms;
+        self.resume_count += 1;
+    }
+
+    pub fn request_yield(&mut self) {
+        self.requested_yield = true;
+    }
+
+    pub fn request_sleep(&mut self, duration_ms: u64) {
+        self.block_reason = Some(RuntimeBlockReason::Sleep { duration_ms });
+    }
+
+    pub fn request_io_wait(&mut self, channel: String) {
+        self.block_reason = Some(RuntimeBlockReason::Io { channel });
+    }
+
+    fn classify_completion(&self, exit_code: i32) -> RuntimePoll {
+        if let Some(reason) = self.block_reason.clone() {
+            RuntimePoll::Waiting(reason)
+        } else if self.requested_yield {
+            RuntimePoll::Yielded
+        } else {
+            RuntimePoll::Exited(exit_code)
+        }
     }
 }
 
@@ -94,11 +153,13 @@ pub struct RuntimeContext {
     pub gui: Arc<GuiSubsystem>,
     pub abi: AbiSelection,
     pub wasi: RuntimeWasi,
+    pub control: Arc<Mutex<TaskRuntimeControl>>,
 }
 
 struct TaskInstance {
     request: ProgramLaunchRequest,
     module: Module,
+    control: Arc<Mutex<TaskRuntimeControl>>,
 }
 
 pub struct WasmRuntime {
@@ -141,7 +202,10 @@ impl WasmRuntime {
 
     fn build_linker(engine: &Engine) -> Result<Linker<RuntimeContext>> {
         let mut linker = Linker::new(engine);
-        wasmtime_wasi::preview1::add_to_linker_async(&mut linker, |context| context.wasi.ctx())?;
+        wasmtime_wasi::preview1::add_to_linker_async(
+            &mut linker,
+            |context: &mut RuntimeContext| context.wasi.ctx(),
+        )?;
         SystemCallRegistry::link(&mut linker)?;
         Ok(linker)
     }
@@ -176,14 +240,19 @@ impl WasmRuntime {
             TaskInstance {
                 request: request.clone(),
                 module,
+                control: Arc::new(Mutex::new(TaskRuntimeControl::default())),
             },
         );
         Ok(())
     }
 
-    pub async fn resume(&self, task_id: TaskId) -> Result<i32> {
+    pub async fn resume(&self, task_id: TaskId, quantum_ms: u64) -> Result<RuntimePoll> {
         let tasks = self.tasks.read().await;
         let task = tasks.get(&task_id).context("task not registered")?;
+        {
+            let mut control = task.control.lock().await;
+            control.reset_for_quantum(quantum_ms);
+        }
         let context = RuntimeContext {
             task_id,
             host: self.host.clone(),
@@ -192,6 +261,7 @@ impl WasmRuntime {
             gui: self.gui.clone(),
             abi: task.request.abi.clone(),
             wasi: RuntimeWasi::build(&task.request)?,
+            control: task.control.clone(),
         };
         let mut store = Store::new(&self.engine, context);
         store.set_fuel(10_000)?;
@@ -199,12 +269,16 @@ impl WasmRuntime {
             .linker
             .instantiate_async(&mut store, &task.module)
             .await?;
-        if let Ok(start) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
+        let exit_code = if let Ok(start) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
             start.call_async(&mut store, ()).await?;
+            0
         } else if let Ok(main) = instance.get_typed_func::<(), i32>(&mut store, "main") {
-            return main.call_async(&mut store, ()).await.map_err(Into::into);
-        }
-        Ok(0)
+            main.call_async(&mut store, ()).await?
+        } else {
+            0
+        };
+        let control = task.control.lock().await;
+        Ok(control.classify_completion(exit_code))
     }
 
     fn validate_abi_strategy(&self, module: &Module, abi: &AbiSelection) -> Result<()> {

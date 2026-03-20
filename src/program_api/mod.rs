@@ -19,7 +19,41 @@ impl SystemCallRegistry {
             "yield_now",
             |caller: Caller<'_, RuntimeContext>, ()| {
                 Box::new(async move {
-                    let _ = caller.data().task_id;
+                    caller.data().control.lock().await.request_yield();
+                    Ok(AbiStatus::Ok.as_i32())
+                })
+            },
+        )?;
+
+        linker.func_wrap_async(
+            "wasmos",
+            "sleep_ms",
+            |caller: Caller<'_, RuntimeContext>, (duration_ms,): (i64,)| {
+                Box::new(async move {
+                    if duration_ms < 0 {
+                        return Ok(AbiStatus::InvalidArgument.as_i32());
+                    }
+                    caller
+                        .data()
+                        .control
+                        .lock()
+                        .await
+                        .request_sleep(duration_ms as u64);
+                    Ok(AbiStatus::Ok.as_i32())
+                })
+            },
+        )?;
+
+        linker.func_wrap_async(
+            "wasmos",
+            "wait_event",
+            |mut caller: Caller<'_, RuntimeContext>, (channel_ptr, channel_len): (i32, i32)| {
+                let channel = match read_guest_string(&mut caller, channel_ptr, channel_len) {
+                    Ok(channel) => channel,
+                    Err(error) => return Box::new(async move { Ok(error.status().as_i32()) }),
+                };
+                Box::new(async move {
+                    caller.data().control.lock().await.request_io_wait(channel);
                     Ok(AbiStatus::Ok.as_i32())
                 })
             },

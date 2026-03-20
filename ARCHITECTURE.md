@@ -40,6 +40,19 @@ WasmOS now models guest execution as a **hybrid WASI + custom import** system:
   - `Hybrid` for programs that combine WASI process semantics with WasmOS-specific capabilities.
 - The runtime validates module imports against the selected ABI strategy before instantiation, preventing accidental mixing of unsupported interfaces.
 
+
+## Multitasking scheduler model
+
+The scheduler now models multitasking as a set of explicit queues and runtime poll states:
+
+- **Ready queue**: runnable tasks waiting for a CPU quantum.
+- **Waiting queue**: tasks blocked on sleep deadlines or named I/O/event channels.
+- **Clock tick**: each scheduler tick advances a logical timer used to wake sleeping tasks.
+- **Runtime poll contract**: the Wasm runtime returns `Ready`, `Yielded`, `Waiting(...)`, or `Exited(...)` so the scheduler can requeue or block tasks instead of treating every run as a one-shot process.
+- **Cooperative/preemptive split**: cooperative mode uses a zero-length quantum marker, while preemptive mode carries an explicit `quantum_ms` value into the runtime control block for future fuel/timer enforcement.
+
+This keeps the architecture aligned with a future resident-task runtime while already separating ready, sleeping, and event-waiting work in the scheduler.
+
 ## Expansion points
 
 - Swap in a real rendering backend behind `GuiSubsystem::draw`.

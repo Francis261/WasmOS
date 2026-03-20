@@ -74,7 +74,7 @@ impl Shell {
                         abi: AbiSelection::default(),
                     })
                     .await?;
-                self.scheduler.tick().await?;
+                self.scheduler.run_ready_tasks(4).await?;
                 Ok(format!("spawned task {task_id}"))
             }
             "ps" => {
@@ -82,6 +82,23 @@ impl Shell {
                 Ok(format!("{:?}", tasks))
             }
             "sched" => Ok(format!("scheduler mode: {:?}", self.scheduler.mode())),
+            "tick" => {
+                self.scheduler.tick().await?;
+                Ok("advanced scheduler by one tick".to_string())
+            }
+            "runloop" => {
+                let rounds = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(8);
+                self.scheduler.run_ready_tasks(rounds).await?;
+                Ok(format!("executed {rounds} scheduling rounds"))
+            }
+            "wake" => {
+                let channel = parts.next().unwrap_or_default();
+                self.scheduler.notify_io(channel).await;
+                Ok(format!("woke tasks waiting on {channel}"))
+            }
             unknown => Ok(format!("unknown command: {unknown}")),
         }
     }
