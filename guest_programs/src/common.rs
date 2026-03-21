@@ -33,9 +33,13 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> T {
 
 pub fn require_ok(code: i32, context: &str) {
     if code != 0 {
-        let status = OsErrorCode::from_i32(code)
-            .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|| "UnknownStatus".to_string());
-        panic!("{context} failed with errno {code} ({status})");
+        panic!("{} failed with {}", context, describe_status(code));
     }
+}
+
+pub fn describe_status(code: i32) -> String {
+    let status = OsErrorCode::from_i32(code)
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_else(|| "UnknownStatus".to_string());
+    format!("errno {code} ({status})")
 }
