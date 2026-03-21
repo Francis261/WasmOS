@@ -10,7 +10,7 @@
 
 ## Modules
 
-- `src/shell`: interactive CLI surface and command dispatch, including staging/execution split commands (`spawn`, `resume`, `runq`, `run`), system inspection commands (`ls`, `cat`, `write`, `rm`, `mkdir`, `mount`, `kill`, `logs`, `net policy`, `window list`), and persistent per-program policy profiles that are copied onto each launched task.
+- `src/shell`: interactive CLI surface and command dispatch, including staging/execution split commands (`spawn`, `resume`, `runq`, `run`), system inspection commands (`ls`, `cat`, `write`, `rm`, `mkdir`, `mount`, `kill`, `logs`, `net policy`, `NP`, `window list`), and persistent per-program policy profiles that are copied onto each launched task.
 - `src/scheduler`: task control blocks, run queue, and scheduling modes.
 - `src/runtime`: Wasmtime engine, persistent task instance lifecycle, and runtime context wiring.
 - `src/program_api`: syscall registration plus guest-facing API skeletons.

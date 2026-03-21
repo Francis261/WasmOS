@@ -322,6 +322,7 @@ impl Shell {
                 let logs = self.logs.lock().await.clone();
                 Ok(logs.join("\n"))
             }
+            "NP" | "np" => self.handle_np_command(&command_line).await,
             "net" => self.handle_net_command(parts.collect()).await,
             "window" => self.handle_window_command(parts.collect()).await,
             "sched" => Ok(format!("scheduler mode: {:?}", self.scheduler.mode())),
@@ -492,6 +493,56 @@ impl Shell {
                 }
             }
             _ => bail!("net policy <show|allow|deny|capability> ..."),
+        }
+    }
+
+    async fn handle_np_command(&self, line: &str) -> Result<String> {
+        let command = line.trim();
+        if let Some(rest) = command
+            .strip_prefix("NP ")
+            .or_else(|| command.strip_prefix("np "))
+        {
+            let rest = rest.trim();
+            if rest.starts_with("set ") {
+                return self.handle_np_set(rest).await;
+            }
+            if rest.starts_with("show") {
+                return self.handle_np_show(rest).await;
+            }
+        }
+        bail!("NP <set|show> [...] (-p <program> | -t <task_id>)")
+    }
+
+    async fn handle_np_show(&self, rest: &str) -> Result<String> {
+        let target = parse_np_target(rest)?;
+        match target {
+            PolicyTarget::Program(program) => {
+                let policy = self.program_policy(&program).await.network;
+                Ok(format!("{:?}", policy))
+            }
+            PolicyTarget::Task(task_id) => {
+                let policy = self.network.policy(task_id).await;
+                Ok(format!("{:?}", policy))
+            }
+        }
+    }
+
+    async fn handle_np_set(&self, rest: &str) -> Result<String> {
+        let (updates, target) = parse_np_set_command(rest)?;
+        match target {
+            PolicyTarget::Program(program) => {
+                self.update_program_policy(&program, |profile| {
+                    apply_network_updates(&mut profile.network, &updates)
+                })
+                .await?;
+                Ok(format!("updated network policy for program {program}"))
+            }
+            PolicyTarget::Task(task_id) => {
+                let mut policy = self.network.policy(task_id).await;
+                apply_network_updates(&mut policy, &updates);
+                self.network.set_policy(task_id, policy).await;
+                Ok(format!("updated network policy for task {task_id}"))
+            }
         }
     }
 
@@ -1113,7 +1164,7 @@ impl Shell {
                     format!("package {package_name} failed (task {task_id}): {reason}");
                 if reason.contains("PermissionDenied") {
                     message.push_str(
-                        ". hint: enable task network capabilities with `net policy capability <task_id> remote on` and `net policy capability <task_id> http on`",
+                        ". hint: enable task network capabilities with `NP set [remote: on, http: on] -t <task_id>`",
                     );
                 }
                 message
@@ -1305,30 +1356,49 @@ mod tests {
     async fn program_policy_is_persisted_separately_from_task_policy() {
         let shell = shell_fixture();
         shell
-            .handle_command("net policy capability program http-fetch remote on")
+            .handle_command("NP set [remote: on] -p http-fetch")
             .await
             .expect("program policy update should succeed");
         shell
-            .handle_command("net policy capability program http-fetch http on")
+            .handle_command("NP set [http: on] -p http-fetch")
             .await
             .expect("program policy update should succeed");
         shell
-            .handle_command("net policy capability program file-ops remote off")
+            .handle_command("NP set [remote: off] -p file-ops")
             .await
             .expect("independent program policy should succeed");
 
         let http_fetch = shell
-            .handle_command("net policy show program http-fetch")
+            .handle_command("NP show -p http-fetch")
             .await
             .expect("show should succeed");
         let file_ops = shell
-            .handle_command("net policy show program file-ops")
+            .handle_command("NP show -p file-ops")
             .await
             .expect("show should succeed");
 
         assert!(http_fetch.contains("allow_remote: true"));
         assert!(http_fetch.contains("allow_http: true"));
         assert!(file_ops.contains("allow_remote: false"));
+    }
+
+    #[tokio::test]
+    async fn np_set_all_true_enables_all_network_capabilities_for_program() {
+        let shell = shell_fixture();
+        shell
+            .handle_command("NP set [all: true] -p http-fetch")
+            .await
+            .expect("all:true should succeed");
+
+        let output = shell
+            .handle_command("NP show -p http-fetch")
+            .await
+            .expect("show should succeed");
+
+        assert!(output.contains("allow_remote: true"));
+        assert!(output.contains("allow_http: true"));
+        assert!(output.contains("allow_websocket: true"));
+        assert!(output.contains("allow_tcp: true"));
     }
 }
 
@@ -1356,5 +1426,103 @@ fn default_program_policy_profile() -> ProgramPolicyProfile {
             allow_delete: true,
             ..TaskVfsPolicy::default()
         },
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PolicyTarget {
+    Program(String),
+    Task(u64),
+}
+
+#[derive(Debug, Clone)]
+enum NetworkUpdate {
+    Capability { name: String, enabled: bool },
+    All(bool),
+}
+
+fn parse_np_target(rest: &str) -> Result<PolicyTarget> {
+    let args = rest.split_whitespace().collect::<Vec<_>>();
+    if let Some(index) = args.iter().position(|value| *value == "-p") {
+        let program = args
+            .get(index + 1)
+            .ok_or_else(|| anyhow::anyhow!("NP show -p <program>"))?;
+        return Ok(PolicyTarget::Program((*program).to_string()));
+    }
+    if let Some(index) = args.iter().position(|value| *value == "-t") {
+        let task_id = parse_u64(args.get(index + 1).copied(), "NP show -t <task_id>")?;
+        return Ok(PolicyTarget::Task(task_id));
+    }
+    bail!("NP <set|show> [...] (-p <program> | -t <task_id>)")
+}
+
+fn parse_np_set_command(rest: &str) -> Result<(Vec<NetworkUpdate>, PolicyTarget)> {
+    let start = rest
+        .find('[')
+        .ok_or_else(|| anyhow::anyhow!("NP set [key: value, ...] (-p <program> | -t <task_id>)"))?;
+    let end = rest[start..]
+        .find(']')
+        .map(|index| start + index)
+        .ok_or_else(|| anyhow::anyhow!("missing closing `]` in NP set command"))?;
+    let updates = parse_np_updates(&rest[start + 1..end])?;
+    let target = parse_np_target(rest[end + 1..].trim())?;
+    Ok((updates, target))
+}
+
+fn parse_np_updates(raw: &str) -> Result<Vec<NetworkUpdate>> {
+    let mut updates = Vec::new();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (key, value) = entry
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("expected `key: value` inside []"))?;
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "all" => updates.push(NetworkUpdate::All(parse_bool_flag(value)?)),
+            "http" | "ws" | "tcp" | "remote" => {
+                updates.push(NetworkUpdate::Capability {
+                    name: key,
+                    enabled: parse_bool_flag(value)?,
+                });
+            }
+            _ => bail!("unknown NP setting: {key}"),
+        }
+    }
+    if updates.is_empty() {
+        bail!("NP set requires at least one setting inside []");
+    }
+    Ok(updates)
+}
+
+fn parse_bool_flag(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        other => bail!("invalid boolean value: {other}"),
+    }
+}
+
+fn apply_network_updates(policy: &mut SocketPolicy, updates: &[NetworkUpdate]) {
+    for update in updates {
+        match update {
+            NetworkUpdate::All(enabled) => {
+                policy.allow_remote = *enabled;
+                policy.allow_http = *enabled;
+                policy.allow_websocket = *enabled;
+                policy.allow_tcp = *enabled;
+                if *enabled {
+                    policy.allowed_hosts.clear();
+                    policy.denied_hosts.clear();
+                    policy.dns_allowlist.clear();
+                }
+            }
+            NetworkUpdate::Capability { name, enabled } => {
+                apply_network_capability(policy, name, *enabled);
+            }
+        }
     }
 }

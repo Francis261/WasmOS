@@ -75,10 +75,11 @@ Installed packages can be executed directly by name.
 
 Network policies can be stored per program so toggling one package does not affect others:
 
-- `net policy show program <program>`
-- `net policy capability program <program> <http|ws|tcp|remote> <on|off>`
-- `net policy allow program <program> <host>`
-- `net policy deny program <program> <host>`
+- `NP show -p <program>`
+- `NP set [http: on, remote: on] -p <program>`
+- `NP set [all: true] -p <program>` enables all network capabilities and clears host-level restrictions
+- `NP show -t <task_id>`
+- `NP set [http: on, remote: on] -t <task_id>`
 
 Those settings are persisted in `.wasmos_program_policies.json` and are applied automatically each time that program is launched.
 
