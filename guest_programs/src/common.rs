@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use wasmos_guest_abi::OsErrorCode;
