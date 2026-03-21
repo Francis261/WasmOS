@@ -94,7 +94,15 @@ impl From<anyhow::Error> for OsError {
         if message.contains("not implemented") {
             return Self::new(OsErrorCode::NotSupported, message);
         }
-        if message.contains("dns") {
+        if message.contains("dns")
+            || message.contains("HTTP request failed")
+            || message.contains("HTTP body read failed")
+            || message.contains("tcp connect failed")
+            || message.contains("websocket connect failed")
+            || message.contains("certificate")
+            || message.contains("tls")
+            || message.contains("connection")
+        {
             return Self::new(OsErrorCode::NetworkUnavailable, message);
         }
         Self::new(OsErrorCode::Internal, message)

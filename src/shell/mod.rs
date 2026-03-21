@@ -1162,6 +1162,9 @@ impl Shell {
             TaskState::Failed(reason) => {
                 let mut message =
                     format!("package {package_name} failed (task {task_id}): {reason}");
+                if let Some(network_error) = self.network.last_error(task_id).await {
+                    message.push_str(&format!(". network detail: {network_error}"));
+                }
                 if reason.contains("PermissionDenied") {
                     message.push_str(
                         ". hint: enable task network capabilities with `NP set [remote: on, http: on] -t <task_id>`",

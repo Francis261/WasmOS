@@ -92,6 +92,7 @@ struct TcpSession {
 pub struct NetworkSubsystem {
     host: Arc<HostBridge>,
     policies: RwLock<BTreeMap<u64, SocketPolicy>>,
+    last_errors: RwLock<BTreeMap<u64, String>>,
     next_socket_id: Mutex<SocketId>,
     websockets: RwLock<BTreeMap<SocketId, WebSocketSession>>,
     tcp_sockets: RwLock<BTreeMap<SocketId, TcpSession>>,
@@ -102,6 +103,7 @@ impl NetworkSubsystem {
         Self {
             host,
             policies: RwLock::new(BTreeMap::new()),
+            last_errors: RwLock::new(BTreeMap::new()),
             next_socket_id: Mutex::new(1),
             websockets: RwLock::new(BTreeMap::new()),
             tcp_sockets: RwLock::new(BTreeMap::new()),
@@ -114,6 +116,10 @@ impl NetworkSubsystem {
 
     pub async fn policy(&self, task_id: u64) -> SocketPolicy {
         self.policy_for(task_id).await
+    }
+
+    pub async fn last_error(&self, task_id: u64) -> Option<String> {
+        self.last_errors.read().await.get(&task_id).cloned()
     }
 
     pub async fn http_request(&self, task_id: u64, request: HttpRequest) -> Result<HttpResponse> {
@@ -146,7 +152,19 @@ impl NetworkSubsystem {
         }
 
         let response =
-            timeout(Duration::from_millis(policy.io_timeout_ms), builder.send()).await??;
+            match timeout(Duration::from_millis(policy.io_timeout_ms), builder.send()).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    self.record_error(task_id, format!("HTTP request failed: {error}"))
+                        .await;
+                    return Err(error.into());
+                }
+                Err(error) => {
+                    let message = format!("HTTP request timed out: {error}");
+                    self.record_error(task_id, message.clone()).await;
+                    return Err(error.into());
+                }
+            };
         let status = response.status().as_u16();
         let mut headers = BTreeMap::new();
         for (key, value) in response.headers() {
@@ -155,15 +173,31 @@ impl NetworkSubsystem {
                 value.to_str().unwrap_or_default().to_string(),
             );
         }
-        let bytes = timeout(
+        let bytes = match timeout(
             Duration::from_millis(policy.io_timeout_ms),
             response.bytes(),
         )
-        .await??;
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                self.record_error(task_id, format!("HTTP body read failed: {error}"))
+                    .await;
+                return Err(error.into());
+            }
+            Err(error) => {
+                let message = format!("HTTP body read timed out: {error}");
+                self.record_error(task_id, message.clone()).await;
+                return Err(error.into());
+            }
+        };
         if bytes.len() > policy.max_response_bytes {
-            bail!("HTTP response exceeded {} bytes", policy.max_response_bytes)
+            let message = format!("HTTP response exceeded {} bytes", policy.max_response_bytes);
+            self.record_error(task_id, message.clone()).await;
+            bail!("{message}")
         }
 
+        self.clear_error(task_id).await;
         Ok(HttpResponse {
             status,
             headers,
@@ -186,7 +220,9 @@ impl NetworkSubsystem {
             Duration::from_millis(policy.connect_timeout_ms),
             connect_async(url.as_str()),
         )
-        .await??;
+        .await
+        .map_err(|error| anyhow::anyhow!("websocket connect timed out: {error}"))?
+        .map_err(|error| anyhow::anyhow!("websocket connect failed: {error}"))?;
 
         let socket_id = self.next_socket_id().await;
         self.websockets.write().await.insert(
@@ -256,7 +292,9 @@ impl NetworkSubsystem {
             Duration::from_millis(policy.connect_timeout_ms),
             TcpStream::connect((host, port)),
         )
-        .await??;
+        .await
+        .map_err(|error| anyhow::anyhow!("tcp connect timed out: {error}"))?
+        .map_err(|error| anyhow::anyhow!("tcp connect failed: {error}"))?;
 
         let socket_id = self.next_socket_id().await;
         self.tcp_sockets.write().await.insert(
@@ -333,6 +371,14 @@ impl NetworkSubsystem {
             .get(&task_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    async fn record_error(&self, task_id: u64, message: String) {
+        self.last_errors.write().await.insert(task_id, message);
+    }
+
+    async fn clear_error(&self, task_id: u64) {
+        self.last_errors.write().await.remove(&task_id);
     }
 
     async fn enforce(&self, task_id: u64, host: &str, capability: NetworkCapability) -> Result<()> {
@@ -469,6 +515,50 @@ mod tests {
         assert!(
             !err.to_string().is_empty(),
             "network error should provide a message"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_subsystem_remembers_last_http_error_message() {
+        let network = network_fixture();
+        let task_id = 24;
+        network
+            .set_policy(
+                task_id,
+                SocketPolicy {
+                    allow_remote: true,
+                    allow_http: true,
+                    allow_websocket: false,
+                    allow_tcp: false,
+                    allowed_hosts: vec!["203.0.113.1".to_string()],
+                    denied_hosts: Vec::new(),
+                    dns_allowlist: vec!["203.0.113.1".to_string()],
+                    connect_timeout_ms: 1,
+                    io_timeout_ms: 5,
+                    max_response_bytes: 1024,
+                    max_message_bytes: 256,
+                },
+            )
+            .await;
+        let _ = network
+            .http_request(
+                task_id,
+                HttpRequest {
+                    method: "GET".to_string(),
+                    url: Url::parse("http://203.0.113.1").expect("url should parse"),
+                    headers: BTreeMap::new(),
+                    body: Vec::new(),
+                },
+            )
+            .await;
+
+        let message = network
+            .last_error(task_id)
+            .await
+            .expect("failed request should record an error message");
+        assert!(
+            message.contains("HTTP"),
+            "expected recorded error message, got {message:?}"
         );
     }
 }
