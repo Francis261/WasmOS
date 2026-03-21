@@ -127,7 +127,7 @@ impl Scheduler {
                 self.waiting_queue.write().await.remove(&task_id);
             }
             Err(error) => {
-                self.mark_state(task_id, TaskState::Failed(error.to_string()))
+                self.mark_state(task_id, TaskState::Failed(format_runtime_error(&error)))
                     .await;
                 self.waiting_queue.write().await.remove(&task_id);
             }
@@ -292,6 +292,15 @@ impl Scheduler {
     }
 }
 
+fn format_runtime_error(error: &anyhow::Error) -> String {
+    let display = format!("{error:#}");
+    if display.contains('\n') {
+        display
+    } else {
+        format!("{error:?}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +446,20 @@ mod tests {
             matches!(final_state.state, TaskState::Exited(0)),
             "expected exited state after wake, got {:?}",
             final_state.state
+        );
+    }
+
+    #[test]
+    fn runtime_error_formatter_keeps_context_chain() {
+        let error = anyhow::anyhow!("inner cause").context("outer context");
+        let formatted = format_runtime_error(&error);
+        assert!(
+            formatted.contains("outer context"),
+            "formatted error should keep outer context: {formatted}"
+        );
+        assert!(
+            formatted.contains("inner cause"),
+            "formatted error should keep inner cause: {formatted}"
         );
     }
 }
