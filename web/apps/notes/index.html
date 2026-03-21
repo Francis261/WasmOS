@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notes</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+      textarea { width: 100%; min-height: 280px; }
+      button { margin-top: 8px; padding: 8px 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Notes</h1>
+    <textarea id="note"></textarea>
+    <button id="save">Save</button>
+    <p id="status"></p>
+    <script type="module">
+      import { createAppApi } from '/desktop/app-sdk.js';
+      const api = createAppApi('notes');
+      const textarea = document.querySelector('#note');
+      const status = document.querySelector('#status');
+      try {
+        const payload = await api.read('notes.txt');
+        textarea.value = payload.content;
+      } catch {}
+      document.querySelector('#save').addEventListener('click', async () => {
+        await api.write('notes.txt', textarea.value);
+        status.textContent = 'Saved locally';
+      });
+    </script>
+  </body>
+</html>

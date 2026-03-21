@@ -1,0 +1,7 @@
+{
+  "id": "notes",
+  "name": "Notes",
+  "description": "App-private note storage.",
+  "entry": "/apps/notes/index.html",
+  "permissions": ["app-fs"]
+}

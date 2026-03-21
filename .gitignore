@@ -1,10 +1,7 @@
-/target
-/guest_programs/target/
-/guest_abi/target/
-/.wasmos_vfs_snapshot.json
-/.wasmos_packages.json
-/.wasmos_pkg_catalog.json
-/.wasmos_pkg_hosts.json
-/.wasmosrc
-out/
-.DS_Store
+node_modules/
+dist/
+target/
+*.log
+*.iso
+*.qcow2
+.env

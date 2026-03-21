@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+      button { padding: 8px 12px; margin-right: 8px; }
+      pre { background: #f4f4f4; padding: 12px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Settings</h1>
+    <p>This app surfaces local runtime state and can request WASM execution through the backend bridge.</p>
+    <button id="storage">Show storage</button>
+    <button id="runtime">Ping runtime</button>
+    <pre id="output"></pre>
+    <script type="module">
+      import { createAppApi } from '/desktop/app-sdk.js';
+      const api = createAppApi('settings');
+      const out = document.querySelector('#output');
+      document.querySelector('#storage').onclick = async () => {
+        out.textContent = JSON.stringify(await api.list(), null, 2);
+      };
+      document.querySelector('#runtime').onclick = async () => {
+        out.textContent = JSON.stringify(await api.executeWasm('system-info', ['--json']), null, 2);
+      };
+    </script>
+  </body>
+</html>

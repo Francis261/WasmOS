@@ -1,0 +1,72 @@
+:root {
+  color-scheme: dark;
+  --bg: #101522;
+  --panel: #1a2235;
+  --panel-2: #24304a;
+  --text: #f5f7fb;
+  --accent: #66b2ff;
+}
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+#desktop-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 1fr 40px;
+  height: 100vh;
+}
+#launcher {
+  background: var(--panel);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+#workspace {
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  align-content: start;
+  overflow: auto;
+}
+#statusbar {
+  grid-column: 1 / -1;
+  background: #0b0f19;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 14px;
+}
+.launcher-item,
+.window {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.launcher-item {
+  cursor: pointer;
+  padding: 12px;
+  text-align: left;
+}
+.window header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.window iframe {
+  width: 100%;
+  min-height: 420px;
+  border: 0;
+  background: #fff;
+}
+button, input, textarea, select {
+  font: inherit;
+}

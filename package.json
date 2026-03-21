@@ -1,0 +1,10 @@
+{
+  "name": "newos-web-stack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "check": "node --check server/index.js && node --check web/desktop/desktop.js"
+  }
+}

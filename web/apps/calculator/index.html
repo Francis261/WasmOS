@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Calculator</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+      input, button { font: inherit; padding: 8px; margin: 4px 0; width: 100%; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>Calculator</h1>
+    <input id="expression" placeholder="e.g. (2 + 5) * 9 / 3" />
+    <button id="calculate">Evaluate</button>
+    <output id="result"></output>
+    <script>
+      document.querySelector('#calculate').addEventListener('click', () => {
+        const expr = document.querySelector('#expression').value;
+        try {
+          const value = Function(`"use strict"; return (${expr})`)();
+          document.querySelector('#result').textContent = String(value);
+        } catch {
+          document.querySelector('#result').textContent = 'Invalid expression';
+        }
+      });
+    </script>
+  </body>
+</html>

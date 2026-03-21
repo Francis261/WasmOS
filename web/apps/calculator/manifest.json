@@ -1,0 +1,7 @@
+{
+  "id": "calculator",
+  "name": "Calculator",
+  "description": "Offline arithmetic utility.",
+  "entry": "/apps/calculator/index.html",
+  "permissions": []
+}

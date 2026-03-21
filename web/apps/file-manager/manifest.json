@@ -1,0 +1,7 @@
+{
+  "id": "file-manager",
+  "name": "File Manager",
+  "description": "Manage files in shared storage.",
+  "entry": "/apps/file-manager/index.html",
+  "permissions": ["shared-fs"]
+}

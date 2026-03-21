@@ -1,55 +1,72 @@
-# WasmOS module design
+# Runtime architecture reference
 
-## Layer boundaries
+## Layer separation
 
 ```text
-Shell -> Scheduler -> RuntimeHost -> { VFS, NetManager, GuiBroker } -> Host OS
+Shell / CLI
+  -> Scheduler
+    -> WASM Runtime (Wasmtime/WASI + host functions)
+      -> VFS / Networking / GUI capability services
+        -> Host OS bridge (Node backend, browser desktop, Linux services)
 ```
 
-## Core data types
+## Module responsibilities
 
-### Shell
-- `Shell`: parses commands, performs lightweight validation, and delegates process creation.
-- `ShellResponse`: normalized terminal output contract for the web desktop.
+### `runtime/src/shell`
+- Parse command lines.
+- Resolve built-in shell commands.
+- Submit runnable tasks to the scheduler.
+- Request WASM preparation from the runtime host.
 
-### Scheduler
-- `SpawnRequest`: app ID, Wasm module path, and argument vector.
-- `TaskRecord`: task metadata stored in the scheduler table.
-- `TaskState`: `ready`, `running`, `yielded`, `exited`, `faulted`.
+### `runtime/src/scheduler`
+- Maintain task control blocks.
+- Provide cooperative round-robin scheduling hooks.
+- Track PID, state, and execution ticks.
+- Surface extension points for preemption/timers.
 
-### RuntimeHost
-- Initializes Wasmtime with async support, component model support, and fuel accounting.
-- Validates that each program is a `.wasm` module.
-- Materializes capability views before execution.
+### `runtime/src/wasm`
+- Own the Wasmtime engine and linker.
+- Bind WASI plus custom host capability interfaces.
+- Prepare isolated stores for each task.
+- Mediate VFS/network/GUI access so guest modules never access host memory directly.
 
-### VirtualFileSystem
-- Uses an in-memory `BTreeMap<String, Vec<u8>>` for file blobs.
-- Keeps directory membership in a `BTreeSet<String>`.
-- Restricts access to `/apps`, `/data`, and `/system`.
+### `runtime/src/vfs`
+- Provide an in-memory file tree.
+- Support host-backed mounts as a future extension.
+- Return opaque data to the runtime host instead of raw host pointers.
 
-### NetManager
-- Stores per-app `NetPolicy` allowlists for HTTP, WebSocket, and TCP.
-- Defaults all apps to `offline_only = true`.
+### `runtime/src/net`
+- Enforce URL and protocol authorization.
+- Support separate capability gates for HTTP, WebSocket, and TCP.
+- Centralize policy updates for each app or tenant.
 
-### GuiBroker
-- Owns the host-rendered window model.
-- Decouples guest drawing/event requests from Chromium iframes.
+### `runtime/src/gui`
+- Accept GUI commands from guest programs.
+- Represent windows, draw requests, and event channels.
+- Relay drawing/event packets to the host renderer.
 
-## Intended host bindings for guest programs
+## Guest API model
 
-```rust
-pub trait WasmOsHost {
-    fn vfs_open(&mut self, task_id: &str, path: &str) -> Result<u32, HostError>;
-    fn vfs_read(&mut self, fd: u32, len: usize) -> Result<Vec<u8>, HostError>;
-    fn vfs_write(&mut self, fd: u32, data: &[u8]) -> Result<(), HostError>;
-    fn vfs_readdir(&mut self, path: &str) -> Result<Vec<String>, HostError>;
-    fn net_http_fetch(&mut self, request: HttpRequest) -> Result<HttpResponse, HostError>;
-    fn net_ws_connect(&mut self, url: &str) -> Result<u32, HostError>;
-    fn gui_window_open(&mut self, desc: WindowOpen) -> Result<String, HostError>;
-    fn gui_draw_text(&mut self, window_id: &str, text: &str) -> Result<(), HostError>;
-    fn scheduler_yield(&mut self) -> Result<(), HostError>;
-    fn proc_exit(&mut self, code: i32) -> Result<(), HostError>;
-}
-```
+Recommended guest-facing syscalls or component interfaces:
 
-These bindings can be exposed through preview2/WIT worlds or through low-level Wasmtime linker functions.
+- `fs_open(path, flags) -> fd`
+- `fs_read(fd, len) -> bytes`
+- `fs_write(fd, bytes) -> written`
+- `fs_list(path) -> list<string>`
+- `net_request(method, url, headers, body) -> response`
+- `net_websocket_connect(url) -> socket_id`
+- `gui_window_open(title, width, height) -> window_id`
+- `gui_draw_text(window_id, x, y, text)`
+- `gui_draw_pixels(window_id, width, height, rgba)`
+- `sched_yield()`
+- `proc_spawn(module, argv) -> pid`
+
+## Browser bridge strategy
+
+The browser desktop should not run WASM tasks with direct host permissions. Instead:
+
+1. A local app asks the backend to execute a module.
+2. The backend validates the app manifest and storage scope.
+3. The backend forwards the request to the Rust runtime daemon or CLI.
+4. The runtime executes the WASM module in an isolated store with explicit capabilities.
+5. GUI output is transformed into renderer-safe commands for the desktop host.

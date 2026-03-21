@@ -1,0 +1,7 @@
+{
+  "id": "settings",
+  "name": "Settings",
+  "description": "Inspect runtime and storage state.",
+  "entry": "/apps/settings/index.html",
+  "permissions": ["app-fs", "wasm-exec"]
+}
