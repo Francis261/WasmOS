@@ -1162,6 +1162,9 @@ impl Shell {
             TaskState::Failed(reason) => {
                 let mut message =
                     format!("package {package_name} failed (task {task_id}): {reason}");
+                if let Some(stderr) = self.scheduler.guest_stderr(task_id).await {
+                    message.push_str(&format!(". guest stderr: {}", stderr.replace('\n', " | ")));
+                }
                 if let Some(network_error) = self.network.last_error(task_id).await {
                     message.push_str(&format!(". network detail: {network_error}"));
                 }

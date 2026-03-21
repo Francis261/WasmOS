@@ -195,6 +195,10 @@ impl Scheduler {
             .any(|task| !matches!(task.state, TaskState::Exited(_) | TaskState::Failed(_)))
     }
 
+    pub async fn guest_stderr(&self, task_id: TaskId) -> Option<String> {
+        self.runtime.guest_stderr(task_id).await
+    }
+
     async fn advance_clock(&self) -> u64 {
         let mut tick = self.clock_tick.lock().await;
         *tick += 1;

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use wasmtime::{Config, Engine, Instance, Linker, Module, Store};
 use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::pipe::MemoryOutputPipe;
 use wasmtime_wasi::preview1::WasiP1Ctx;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ impl Default for WasiOptions {
 
 pub struct RuntimeWasi {
     ctx: WasiP1Ctx,
+    stderr: MemoryOutputPipe,
 }
 
 impl std::fmt::Debug for RuntimeWasi {
@@ -72,9 +74,12 @@ impl std::fmt::Debug for RuntimeWasi {
 impl RuntimeWasi {
     fn build(request: &ProgramLaunchRequest) -> Result<Self> {
         let mut builder = WasiCtxBuilder::new();
+        let stderr = MemoryOutputPipe::new(64 * 1024);
         if request.abi.wasi.inherit_stdio {
-            builder.inherit_stdio();
+            builder.inherit_stdin();
+            builder.inherit_stdout();
         }
+        builder.stderr(stderr.clone());
         builder.args(&request.args);
         if request.abi.wasi.expose_cli_environment {
             for (key, value) in &request.env {
@@ -83,11 +88,18 @@ impl RuntimeWasi {
         }
         Ok(Self {
             ctx: builder.build_p1(),
+            stderr,
         })
     }
 
     pub fn ctx(&mut self) -> &mut WasiP1Ctx {
         &mut self.ctx
+    }
+
+    pub fn stderr_contents(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.contents())
+            .trim()
+            .to_string()
     }
 }
 
@@ -353,6 +365,14 @@ impl WasmRuntime {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    pub async fn guest_stderr(&self, task_id: TaskId) -> Option<String> {
+        let tasks = self.tasks.read().await;
+        let task = tasks.get(&task_id)?;
+        let state = task.state.lock().await;
+        let stderr = state.store.data().wasi.stderr_contents();
+        (!stderr.is_empty()).then_some(stderr)
     }
 
     fn validate_abi_strategy(&self, module: &Module, abi: &AbiSelection) -> Result<()> {
