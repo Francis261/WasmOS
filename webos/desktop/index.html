@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NewOS</title>
+    <link rel="stylesheet" href="/desktop/styles.css" />
+  </head>
+  <body>
+    <div id="desktop-shell">
+      <header class="topbar">
+        <strong>NewOS</strong>
+        <nav id="launcher"></nav>
+      </header>
+      <main id="workspace" aria-live="polite"></main>
+      <aside id="side-panel">
+        <section>
+          <h2>Shell</h2>
+          <form id="shell-form">
+            <input id="shell-command" placeholder="help" autocomplete="off" />
+            <button>Run</button>
+          </form>
+          <pre id="shell-output"></pre>
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="/desktop/desktop.js"></script>
+  </body>
+</html>

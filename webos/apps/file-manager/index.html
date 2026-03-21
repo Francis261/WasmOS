@@ -1,0 +1,11 @@
+<!doctype html><html><body><script type="module">
+const root = document.body;
+root.innerHTML = '<main><h1>Files</h1><button id="refresh">Refresh</button><ul id="list"></ul></main>';
+const list = root.querySelector('#list');
+async function refresh() {
+  const files = await fetch('/api/files?path=/data').then((response) => response.json());
+  list.innerHTML = files.map((entry) => `<li>${entry.path} (${entry.kind})</li>`).join('');
+}
+root.querySelector('#refresh').onclick = refresh;
+refresh();
+</script></body></html>

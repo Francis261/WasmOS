@@ -21,6 +21,9 @@ It is organized in explicit layers:
 - `src/host`: host capability detection and boundary.
 - `docs/abi.md`: versioned guest ABI contract.
 - `guest_abi`: shared guest-side ABI structs/constants.
+- `crates/wasmos-host`: standalone Web OS host service that exposes the desktop shell, HTTP API, and kiosk integration path.
+- `webos/`: local desktop shell plus HTML/JS app bundles mounted into Chromium kiosk mode.
+- `buildroot/`: boot assets, GRUB config, init scripts, and rootfs overlay for the bootable ISO profile.
 
 ## Build and run
 
@@ -33,6 +36,12 @@ Optional desktop GUI backend:
 
 ```bash
 cargo run --features desktop-gui
+```
+
+Standalone Web OS host service:
+
+```bash
+cargo run --manifest-path crates/wasmos-host/Cargo.toml
 ```
 
 ## Build guest wasm binaries
@@ -95,6 +104,25 @@ Editor commands:
 - `:select_all`
 - `:paste`
 - `:help`
+
+## Web OS boot profile
+
+The new Web OS profile boots a minimal Linux image straight into a fully local Chromium kiosk session.
+
+- `buildroot/board/newos/grub/grub.cfg` auto-loads the kernel/initrd with no menu and supports a splash asset.
+- `buildroot/board/newos/rootfs-overlay/etc/init.d/S99newos` starts the local host service and Chromium kiosk automatically.
+- `buildroot/board/newos/rootfs-overlay/usr/local/bin/newos-kiosk` launches Chromium with low-memory kiosk flags.
+- `buildroot/board/newos/rootfs-overlay/usr/local/bin/newos-server` runs the Rust HTTP host that serves `/desktop`, `/apps`, `/api/*`, and app-scoped storage.
+- `webos/apps/` is the runtime app directory; apps load dynamically at runtime inside sandboxed iframes.
+- `docs/architecture.md` documents the Shell → Scheduler → RuntimeHost → VFS/Net/GUI → Host OS contract.
+- `docs/iso-packaging.md` and `scripts/package-iso.sh` document the ISO packaging and QEMU test flow.
+
+### App sandboxing
+
+- Each app gets `/apps/<app-id>` and `/data/apps/<app-id>` capability roots.
+- Path traversal is rejected before host filesystem access is granted.
+- Apps render in sandboxed Chromium iframes and communicate only through the local host API.
+- Network policy defaults to offline-only until an app-specific allowlist is configured.
 
 ## Safety model
 

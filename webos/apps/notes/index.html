@@ -1,0 +1,8 @@
+<!doctype html><html><body><script type="module">
+const root = document.body;
+root.innerHTML = '<main><h1>Notes</h1><textarea rows="12" cols="40"></textarea><button>Save</button></main>';
+const textarea = root.querySelector('textarea');
+root.querySelector('button').onclick = async () => {
+  await fetch('/api/files', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({path:'/data/notes.txt', contents: textarea.value})});
+};
+</script></body></html>

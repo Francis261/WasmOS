@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+export HOME=/root
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+mkdir -p "$XDG_RUNTIME_DIR"
+exec chromium-browser \
+  --kiosk \
+  --incognito \
+  --disable-session-crashed-bubble \
+  --disable-features=Translate,AutofillServerCommunication,MediaRouter \
+  --disable-component-update \
+  --disable-background-networking \
+  --disable-sync \
+  --no-default-browser-check \
+  --no-first-run \
+  --disk-cache-dir=/tmp/chromium-cache \
+  --window-size=1280,720 \
+  http://127.0.0.1:8080/desktop/index.html

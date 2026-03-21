@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+/usr/local/bin/newos-server &
+/usr/local/bin/newos-kiosk &
+wait

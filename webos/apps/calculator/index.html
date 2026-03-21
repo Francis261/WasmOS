@@ -1,0 +1,6 @@
+<!doctype html><html><body><script type="module">
+const root = document.body;
+root.innerHTML = '<main><h1>Calculator</h1><input id="expr" placeholder="1+1"><button>=</button><output id="out"></output></main>';
+const expr = root.querySelector('#expr'); const out = root.querySelector('#out');
+root.querySelector('button').onclick = () => { out.textContent = String(Function(`return (${expr.value || 0})`)()); };
+</script></body></html>
